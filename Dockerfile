@@ -1,63 +1,80 @@
-FROM node:24-alpine AS builder
+# syntax=docker/dockerfile:1.6
+# ===========================================================================
+# Evolution API — slim production image
+# ---------------------------------------------------------------------------
+# Optimized for low-RAM hosts (Dokploy / small VPS):
+#   - Skips `tsc --noEmit` typecheck in the image (do that in CI, not on the
+#     deploy host). Typecheck alone holds ~1.5GB of heap on this codebase.
+#   - tsup is configured (see tsup.config.ts) to emit CJS only, no minify,
+#     no sourcemap — that cuts build memory roughly in half.
+#   - Final stage installs prod-only deps (no dev toolchain in the image).
+# ===========================================================================
 
-RUN apk update && \
-    apk add --no-cache git ffmpeg wget curl bash openssl
+ARG NODE_IMAGE=node:24-alpine
 
-LABEL version="2.3.1" description="Api to control whatsapp features through http requests." 
-LABEL maintainer="Davidson Gomes" git="https://github.com/DavidsonGomes"
-LABEL contact="contato@evolution-api.com"
+# ------------------------------- builder ------------------------------------
+FROM ${NODE_IMAGE} AS builder
+
+# Build-time tools only. No `apk update` — `--no-cache` already refreshes.
+RUN apk add --no-cache git bash openssl
 
 WORKDIR /evolution
 
-COPY ./package*.json ./
-COPY ./tsconfig.json ./
-COPY ./tsup.config.ts ./
-COPY ./patches ./patches
+# Install deps first so this layer caches across source-only changes.
+COPY package*.json ./
+COPY patches ./patches
+RUN npm ci --no-audit --no-fund --prefer-offline --silent \
+ && npx patch-package
 
-RUN npm ci --silent
+# Source + config needed to build.
+COPY tsconfig.json tsup.config.ts runWithProvider.js ./
+COPY src ./src
+COPY public ./public
+COPY prisma ./prisma
+COPY manager ./manager
+COPY Docker ./Docker
+COPY .env.example ./.env
 
-RUN npx patch-package
+# Normalize shell scripts (Windows line endings would break them).
+RUN apk add --no-cache dos2unix \
+ && chmod +x ./Docker/scripts/* \
+ && dos2unix ./Docker/scripts/* \
+ && apk del dos2unix
 
-COPY ./src ./src
-COPY ./public ./public
-COPY ./prisma ./prisma
-COPY ./manager ./manager
-COPY ./.env.example ./.env
-COPY ./runWithProvider.js ./
-
-COPY ./Docker ./Docker
-
-RUN chmod +x ./Docker/scripts/* && dos2unix ./Docker/scripts/*
-
+# Prisma client generation (uses DATABASE_PROVIDER from .env).
 RUN ./Docker/scripts/generate_database.sh
 
-RUN NODE_OPTIONS="--max-old-space-size=2048" npm run build
+# Bundle. 1024MB heap cap is plenty without minify/ESM/sourcemap and keeps
+# us safely under typical 2GB Dokploy VPS limits.
+RUN NODE_OPTIONS="--max-old-space-size=1024" npx tsup
 
-FROM node:24-alpine AS final
+# Drop dev dependencies from the tree we'll ship.
+RUN npm prune --omit=dev --silent
 
-RUN apk update && \
-    apk add tzdata ffmpeg bash openssl
+# -------------------------------- runtime -----------------------------------
+FROM ${NODE_IMAGE} AS final
 
-ENV TZ=America/Sao_Paulo
-ENV DOCKER_ENV=true
+# Runtime needs: ffmpeg (audio/video), bash (entrypoint script),
+# openssl (Prisma), tzdata (timezone).
+RUN apk add --no-cache tzdata ffmpeg bash openssl
+
+ENV TZ=America/Sao_Paulo \
+    DOCKER_ENV=true \
+    NODE_ENV=production
 
 WORKDIR /evolution
 
-COPY --from=builder /evolution/package.json ./package.json
-COPY --from=builder /evolution/package-lock.json ./package-lock.json
-
-COPY --from=builder /evolution/node_modules ./node_modules
-COPY --from=builder /evolution/dist ./dist
-COPY --from=builder /evolution/prisma ./prisma
-COPY --from=builder /evolution/manager ./manager
-COPY --from=builder /evolution/public ./public
-COPY --from=builder /evolution/.env ./.env
-COPY --from=builder /evolution/Docker ./Docker
+COPY --from=builder /evolution/package.json       ./package.json
+COPY --from=builder /evolution/package-lock.json  ./package-lock.json
+COPY --from=builder /evolution/node_modules       ./node_modules
+COPY --from=builder /evolution/dist               ./dist
+COPY --from=builder /evolution/prisma             ./prisma
+COPY --from=builder /evolution/manager            ./manager
+COPY --from=builder /evolution/public             ./public
+COPY --from=builder /evolution/.env               ./.env
+COPY --from=builder /evolution/Docker             ./Docker
 COPY --from=builder /evolution/runWithProvider.js ./runWithProvider.js
-COPY --from=builder /evolution/tsup.config.ts ./tsup.config.ts
-
-ENV DOCKER_ENV=true
 
 EXPOSE 8080
 
-ENTRYPOINT ["/bin/bash", "-c", ". ./Docker/scripts/deploy_database.sh && npm run start:prod" ]
+ENTRYPOINT ["/bin/bash", "-c", ". ./Docker/scripts/deploy_database.sh && npm run start:prod"]
