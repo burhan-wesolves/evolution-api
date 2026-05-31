@@ -413,45 +413,6 @@ export function makeProxyAgent(proxy: Proxy): HttpsProxyAgent<string> | SocksPro
 }
 ```
 
-## Telemetry Utilities
-
-### Telemetry Data Collection
-```typescript
-export interface TelemetryData {
-  route: string;
-  apiVersion: string;
-  timestamp: Date;
-  method?: string;
-  statusCode?: number;
-  responseTime?: number;
-  userAgent?: string;
-  instanceName?: string;
-}
-
-export const sendTelemetry = async (route: string): Promise<void> => {
-  try {
-    const telemetryData: TelemetryData = {
-      route,
-      apiVersion: packageJson.version,
-      timestamp: new Date(),
-    };
-
-    // Only send telemetry if enabled
-    if (process.env.DISABLE_TELEMETRY === 'true') {
-      return;
-    }
-
-    // Send to telemetry service (implement as needed)
-    await axios.post('https://telemetry.evolution-api.com/collect', telemetryData, {
-      timeout: 5000,
-    });
-  } catch (error) {
-    // Silently fail - don't affect main application
-    console.debug('Telemetry failed:', error.message);
-  }
-};
-```
-
 ## Internationalization Utilities
 
 ### i18n Setup

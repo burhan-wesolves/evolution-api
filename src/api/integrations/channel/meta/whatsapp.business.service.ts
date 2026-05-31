@@ -24,7 +24,6 @@ import { AudioConverter, Chatwoot, ConfigService, Database, Openai, S3, WaBusine
 import { BadRequestException, InternalServerErrorException } from '@exceptions';
 import { createJid } from '@utils/createJid';
 import { status } from '@utils/renderStatus';
-import { sendTelemetry } from '@utils/sendTelemetry';
 import axios from 'axios';
 import { arrayUnique, isURL } from 'class-validator';
 import EventEmitter2 from 'eventemitter2';
@@ -759,8 +758,6 @@ export class BusinessStartupService extends ChannelStartupService {
         }
 
         this.logger.log(messageRaw);
-
-        sendTelemetry(`received.message.${messageRaw.messageType ?? 'unknown'}`);
 
         // Normalized order: Chatwoot first, then bot (consistent with Baileys channel)
         if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {

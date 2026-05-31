@@ -16,7 +16,6 @@ import { Events, wa } from '@api/types/wa.types';
 import { AudioConverter, Chatwoot, ConfigService, Openai, S3 } from '@config/env.config';
 import { BadRequestException, InternalServerErrorException } from '@exceptions';
 import { createJid } from '@utils/createJid';
-import { sendTelemetry } from '@utils/sendTelemetry';
 import axios from 'axios';
 import { isBase64, isURL } from 'class-validator';
 import EventEmitter2 from 'eventemitter2';
@@ -180,8 +179,6 @@ export class EvolutionStartupService extends ChannelStartupService {
         }
 
         this.logger.log(messageRaw);
-
-        sendTelemetry(`received.message.${messageRaw.messageType ?? 'unknown'}`);
 
         this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
 

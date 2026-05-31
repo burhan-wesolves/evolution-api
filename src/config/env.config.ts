@@ -363,11 +363,6 @@ export type Metrics = {
   ALLOWED_IPS?: string;
 };
 
-export type Telemetry = {
-  ENABLED: boolean;
-  URL?: string;
-};
-
 export type Proxy = {
   HOST?: string;
   PORT?: string;
@@ -387,15 +382,19 @@ export type Facebook = {
   USER_TOKEN?: string;
 };
 
-export type Sentry = {
-  DSN?: string;
-};
-
 export type EventEmitter = {
   MAX_LISTENERS: number;
 };
 
 export type Production = boolean;
+
+export type Integrations = {
+  ENABLED: boolean;
+};
+
+export type ChatUi = {
+  ENABLED: boolean;
+};
 
 export interface Env {
   SERVER: HttpServer;
@@ -429,12 +428,12 @@ export interface Env {
   S3?: S3;
   AUTHENTICATION: Auth;
   METRICS: Metrics;
-  TELEMETRY: Telemetry;
   PROXY: Proxy;
   AUDIO_CONVERTER: AudioConverter;
   FACEBOOK: Facebook;
-  SENTRY: Sentry;
   EVENT_EMITTER: EventEmitter;
+  INTEGRATIONS: Integrations;
+  CHAT_UI: ChatUi;
   PRODUCTION?: Production;
 }
 
@@ -894,10 +893,6 @@ export class ConfigService {
         PASSWORD: process.env?.METRICS_PASSWORD,
         ALLOWED_IPS: process.env?.METRICS_ALLOWED_IPS,
       },
-      TELEMETRY: {
-        ENABLED: process.env?.TELEMETRY_ENABLED === undefined || process.env?.TELEMETRY_ENABLED === 'true',
-        URL: process.env?.TELEMETRY_URL,
-      },
       PROXY: {
         HOST: process.env?.PROXY_HOST,
         PORT: process.env?.PROXY_PORT,
@@ -914,11 +909,14 @@ export class ConfigService {
         CONFIG_ID: process.env?.FACEBOOK_CONFIG_ID,
         USER_TOKEN: process.env?.FACEBOOK_USER_TOKEN,
       },
-      SENTRY: {
-        DSN: process.env?.SENTRY_DSN,
-      },
       EVENT_EMITTER: {
         MAX_LISTENERS: Number.parseInt(process.env?.EVENT_EMITTER_MAX_LISTENERS) || 50,
+      },
+      INTEGRATIONS: {
+        ENABLED: process.env?.INTEGRATIONS !== 'false',
+      },
+      CHAT_UI: {
+        ENABLED: process.env?.CHAT_UI !== 'false',
       },
     };
   }

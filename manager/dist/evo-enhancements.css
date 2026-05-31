@@ -76,3 +76,17 @@ button[data-evo-busy='true']::after {
     transform: rotate(360deg);
   }
 }
+
+/* Toggled by evo-enhancements.js when the backend reports
+   integrationsEnabled === false. The JS pass marks sidebar rows belonging
+   to chatbot integrations with this attribute. */
+body.evo-integrations-disabled [data-evo-hide-integration] {
+  display: none !important;
+}
+
+/* English-only build: hide the language toggle in the header. The button is
+   icon-only and contains a lucide-languages SVG. We hide it unconditionally
+   because the entire manager is locked to English at startup. */
+button:has(> svg.lucide-languages) {
+  display: none !important;
+}

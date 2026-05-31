@@ -1,0 +1,55 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - img "Evolution API" [ref=e6]
+    - navigation [ref=e7]:
+      - link "Dashboard" [ref=e8] [cursor=pointer]:
+        - /url: /manager
+        - img [ref=e9]
+        - generic [ref=e14]: Dashboard
+    - generic [ref=e15]:
+      - link "Documentation" [ref=e16] [cursor=pointer]:
+        - /url: https://docs.evolutionfoundation.com.br/
+        - img [ref=e17]
+        - generic [ref=e20]: Documentation
+      - link "Postman" [ref=e21] [cursor=pointer]:
+        - /url: https://evolution-api.com/postman
+        - img [ref=e22]
+        - generic [ref=e25]: Postman
+      - link "Discord" [ref=e26] [cursor=pointer]:
+        - /url: https://evolution-api.com/discord
+        - img [ref=e27]
+        - generic [ref=e29]: Discord
+    - generic [ref=e30]:
+      - generic [ref=e31]: Evolution Manager
+      - generic [ref=e32]: © 2026 All rights reserved
+  - generic [ref=e33]:
+    - banner [ref=e34]:
+      - generic [ref=e35]:
+        - button "Toggle theme" [ref=e36]:
+          - img
+          - img
+          - generic [ref=e37]: Toggle theme
+        - button "Sign out" [ref=e38]:
+          - img
+          - text: Sign out
+    - main [ref=e39]:
+      - generic [ref=e41]:
+        - generic [ref=e42]:
+          - generic [ref=e43]:
+            - heading "Instances" [level=1] [ref=e44]
+            - paragraph [ref=e45]: Manage your WhatsApp instances
+          - button "Instance" [ref=e47]:
+            - generic [ref=e48]:
+              - img
+            - text: Instance
+        - generic [ref=e49]:
+          - generic [ref=e50]:
+            - img [ref=e51]
+            - searchbox "Search" [ref=e54]
+          - button "Refresh" [ref=e56]:
+            - generic [ref=e57]:
+              - img
+            - text: Refresh
+        - button "Status" [ref=e59]:
+          - text: Status
+          - img

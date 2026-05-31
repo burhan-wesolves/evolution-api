@@ -1,0 +1,46 @@
+# ===========================================================================
+# Evolution API — Dokploy production stack (custom build, external DB/Redis)
+# ---------------------------------------------------------------------------
+# - Builds the API from THIS repo's Dockerfile so your fork's changes ship.
+# - No Postgres / Redis services: connects to the existing instances you
+#   already run (set DATABASE_CONNECTION_URI and CACHE_REDIS_URI in .env.prod).
+#
+# Dokploy setup:
+#   1. Create a Compose application pointing at this repo (branch: develop).
+#   2. Set the compose file to `docker-compose.prod.yml`.
+#   3. Environment tab → paste .env.prod and fill the *** CHANGE ME *** values.
+#   4. Domains tab → attach your domain to service `api`, port 8080. Traefik
+#      handles TLS.
+#   5. Deploy. Prisma migrations run automatically on first boot.
+#
+# Network note:
+#   The service joins `dokploy-network` so it can reach OTHER Dokploy-managed
+#   services (e.g. a Postgres app you deployed in the same Dokploy instance)
+#   by service name. External / managed DBs work too — just use their FQDN.
+# ===========================================================================
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env.prod
+    volumes:
+      # WhatsApp session files (Baileys auth state). Persist across deploys.
+      - evolution_instances:/evolution/instances
+    expose:
+      - "8080"
+    networks:
+      - dokploy-network
+
+volumes:
+  evolution_instances:
+
+networks:
+  # External network created by Dokploy. Traefik attaches to it to route
+  # public traffic, and other Dokploy apps (e.g. your Postgres / Redis) are
+  # reachable on it by service name.
+  dokploy-network:
+    external: true

@@ -10,6 +10,7 @@ import {
   typebotController,
 } from '@api/server.module';
 import { WAMonitoringService } from '@api/services/monitor.service';
+import { configService, Integrations } from '@config/env.config';
 import { Logger } from '@config/logger.config';
 import { IntegrationSession } from '@prisma/client';
 import { findBotByTrigger } from '@utils/findBotByTrigger';
@@ -84,6 +85,10 @@ export class ChatbotController {
     pushName?: string;
     isIntegration?: boolean;
   }): Promise<void> {
+    if (configService.get<Integrations>('INTEGRATIONS')?.ENABLED === false) {
+      return;
+    }
+
     const emitData = {
       instance,
       remoteJid,

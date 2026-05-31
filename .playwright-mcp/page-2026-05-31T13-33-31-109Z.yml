@@ -1,0 +1,101 @@
+- generic [ref=e68]:
+  - complementary [ref=e69]:
+    - img "Evolution API" [ref=e71]
+    - navigation [ref=e72]:
+      - link "← Instances" [ref=e73] [cursor=pointer]:
+        - /url: /manager
+        - img [ref=e74]
+        - generic [ref=e79]: ← Instances
+      - link "Dashboard" [ref=e81] [cursor=pointer]:
+        - /url: /manager/instance/131b003c-44aa-435e-847a-cb900f428a56/dashboard
+        - img [ref=e82]
+        - generic [ref=e87]: Dashboard
+      - button "Configurations" [ref=e89]:
+        - img [ref=e90]
+        - generic [ref=e101]: Configurations
+        - img [ref=e102]
+      - button "Events" [ref=e105]:
+        - img [ref=e106]
+        - generic [ref=e109]: Events
+        - img [ref=e110]
+    - generic [ref=e112]:
+      - link "Documentation" [ref=e113] [cursor=pointer]:
+        - /url: https://docs.evolutionfoundation.com.br/
+        - img [ref=e114]
+        - generic [ref=e117]: Documentation
+      - link "Postman" [ref=e118] [cursor=pointer]:
+        - /url: https://evolution-api.com/postman
+        - img [ref=e119]
+        - generic [ref=e122]: Postman
+      - link "Discord" [ref=e123] [cursor=pointer]:
+        - /url: https://evolution-api.com/discord
+        - img [ref=e124]
+        - generic [ref=e126]: Discord
+    - generic [ref=e127]:
+      - generic [ref=e128]: Evolution Manager
+      - generic [ref=e129]: © 2026 All rights reserved
+  - generic [ref=e130]:
+    - banner [ref=e131]:
+      - generic [ref=e132]:
+        - generic [ref=e133]:
+          - img "snap-testing" [ref=e135]
+          - generic [ref=e136]: snapexpenses
+        - button "Toggle theme" [ref=e137]:
+          - img
+          - img
+          - generic [ref=e138]: Toggle theme
+        - button "Sign out" [ref=e139]:
+          - img
+          - text: Sign out
+    - main [ref=e140]:
+      - generic [ref=e141]:
+        - generic [ref=e142]:
+          - generic [ref=e144]:
+            - heading "snap-testing" [level=1] [ref=e145]
+            - paragraph [ref=e146]: snapexpenses
+          - generic [ref=e148]:
+            - button "Refresh" [ref=e149]:
+              - generic [ref=e150]:
+                - img
+              - text: Refresh
+            - button "Restart" [ref=e151]:
+              - generic [ref=e152]:
+                - img
+              - text: Restart
+        - generic [ref=e153]:
+          - generic [ref=e154]:
+            - generic [ref=e156]:
+              - generic [ref=e157]:
+                - img "snap-testing" [ref=e159]
+                - generic [ref=e160]:
+                  - generic [ref=e161]: snapexpenses
+                  - paragraph [ref=e162]: "918374857253"
+              - generic [ref=e163]: Disconnected
+            - generic [ref=e164]:
+              - generic [ref=e166]:
+                - generic [ref=e167]: "************-****-****-************"
+                - button [ref=e168]:
+                  - img
+                - button [ref=e169]:
+                  - img
+              - alert [ref=e170]:
+                - generic [ref=e171]: To connect, scan the QR code with your WhatsApp Web
+                - button "Get QR Code" [ref=e173]:
+                  - img
+                  - text: Get QR Code
+          - generic [ref=e174]:
+            - generic [ref=e175]:
+              - generic [ref=e177]:
+                - img [ref=e178]
+                - text: Contacts
+              - generic [ref=e182]: "170"
+            - generic [ref=e183]:
+              - generic [ref=e185]:
+                - img [ref=e186]
+                - text: Chats
+              - generic [ref=e190]: "53"
+            - generic [ref=e191]:
+              - generic [ref=e193]:
+                - img [ref=e194]
+                - text: Messages
+              - generic [ref=e196]: "701"

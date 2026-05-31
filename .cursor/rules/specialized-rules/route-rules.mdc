@@ -52,7 +52,6 @@ export class ExampleRouter extends RouterBroker {
 import { Router } from 'express';
 import { authGuard } from '@api/guards/auth.guard';
 import { instanceExistsGuard, instanceLoggedGuard } from '@api/guards/instance.guard';
-import Telemetry from '@api/guards/telemetry.guard';
 
 enum HttpStatus {
   OK = 200,
@@ -66,10 +65,8 @@ enum HttpStatus {
 
 const router: Router = Router();
 const guards = [instanceExistsGuard, instanceLoggedGuard, authGuard['apikey']];
-const telemetry = new Telemetry();
 
 router
-  .use((req, res, next) => telemetry.collectTelemetry(req, res, next))
   .get('/', async (req, res) => {
     res.status(HttpStatus.OK).json({
       status: HttpStatus.OK,
