@@ -325,14 +325,23 @@ export class InstanceController {
         return await this.connectionState({ instanceName });
       }
 
+      const waitForQrOrOpen = async (timeoutMs = 10000) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          if (instance.connectionStatus?.state === 'open') return;
+          if (instance.qrCode?.base64) return;
+          await delay(250);
+        }
+      };
+
       if (state == 'connecting') {
+        await waitForQrOrOpen();
         return instance.qrCode;
       }
 
       if (state == 'close') {
         await instance.connectToWhatsapp(number);
-
-        await delay(2000);
+        await waitForQrOrOpen();
         return instance.qrCode;
       }
 

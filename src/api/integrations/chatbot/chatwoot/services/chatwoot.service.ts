@@ -724,7 +724,7 @@ export class ChatwootService {
 
       // If lock already exists, wait until release or timeout
       if (await this.cache.has(lockKey)) {
-        this.logger.verbose(`Operação de criação já em andamento para ${remoteJid}, aguardando resultado...`);
+        this.logger.verbose(`Create operation already in progress for ${remoteJid}, awaiting result...`);
         const start = Date.now();
         while (await this.cache.has(lockKey)) {
           if (Date.now() - start > maxWaitTime) {
@@ -1874,26 +1874,21 @@ export class ChatwootService {
       result = result.split('externalAdReplyBody|').filter(Boolean).join('');
     }
 
-    // Tratamento de Pedidos do Catálogo (WhatsApp Business Catalog)
     if (typeKey === 'orderMessage' && result.orderId) {
       const now = Date.now();
-      // Limpa entradas antigas do cache
       this.processedOrderIds.forEach((timestamp, id) => {
         if (now - timestamp > this.ORDER_CACHE_TTL_MS) {
           this.processedOrderIds.delete(id);
         }
       });
-      // Verifica se já processou este orderId
       if (this.processedOrderIds.has(result.orderId)) {
-        return undefined; // Ignora duplicado
+        return undefined;
       }
       this.processedOrderIds.set(result.orderId, now);
     }
-    // Tratamento de Produto citado (WhatsApp Desktop)
     if (typeKey === 'quotedProductMessage' && result?.product) {
       const product = result.product;
 
-      // Extrai preço
       let rawPrice = 0;
       const amount = product.priceAmount1000;
 
@@ -1905,56 +1900,54 @@ export class ChatwootService {
         rawPrice = amount;
       }
 
-      const price = (rawPrice / 1000).toLocaleString('pt-BR', {
+      const price = (rawPrice / 1000).toLocaleString('en-US', {
         style: 'currency',
-        currency: product.currencyCode || 'BRL',
+        currency: product.currencyCode || 'USD',
       });
 
-      const productTitle = product.title || 'Produto do catálogo';
+      const productTitle = product.title || 'Catalog product';
       const productId = product.productId || 'N/A';
 
       return (
-        `🛒 *PRODUTO DO CATÁLOGO (Desktop)*\n` +
+        `🛒 *CATALOG PRODUCT (Desktop)*\n` +
         `━━━━━━━━━━━━━━━━━━━━━\n` +
-        `📦 *Produto:* ${productTitle}\n` +
-        `💰 *Preço:* ${price}\n` +
-        `🆔 *Código:* ${productId}\n` +
+        `📦 *Product:* ${productTitle}\n` +
+        `💰 *Price:* ${price}\n` +
+        `🆔 *Code:* ${productId}\n` +
         `━━━━━━━━━━━━━━━━━━━━━\n` +
-        `_Cliente perguntou: "${types.conversation || 'Me envia este produto?'}"_`
+        `_Customer asked: "${types.conversation || 'Can you send me this product?'}"_`
       );
     }
     if (typeKey === 'orderMessage') {
-      // Extrai o valor - pode ser Long, objeto {low, high}, ou número direto
       let rawPrice = 0;
       const amount = result.totalAmount1000;
 
       if (Long.isLong(amount)) {
         rawPrice = amount.toNumber();
       } else if (amount && typeof amount === 'object' && 'low' in amount) {
-        // Formato {low: number, high: number, unsigned: boolean}
         rawPrice = Long.fromValue(amount).toNumber();
       } else if (typeof amount === 'number') {
         rawPrice = amount;
       }
 
-      const price = (rawPrice / 1000).toLocaleString('pt-BR', {
+      const price = (rawPrice / 1000).toLocaleString('en-US', {
         style: 'currency',
-        currency: result.totalCurrencyCode || 'BRL',
+        currency: result.totalCurrencyCode || 'USD',
       });
 
       const itemCount = result.itemCount || 1;
-      const orderTitle = result.orderTitle || 'Produto do catálogo';
+      const orderTitle = result.orderTitle || 'Catalog product';
       const orderId = result.orderId || 'N/A';
 
       return (
-        `🛒 *NOVO PEDIDO NO CATÁLOGO*\n` +
+        `🛒 *NEW CATALOG ORDER*\n` +
         `━━━━━━━━━━━━━━━━━━━━━\n` +
-        `📦 *Produto:* ${orderTitle}\n` +
-        `📊 *Quantidade:* ${itemCount}\n` +
+        `📦 *Product:* ${orderTitle}\n` +
+        `📊 *Quantity:* ${itemCount}\n` +
         `💰 *Total:* ${price}\n` +
-        `🆔 *Pedido:* #${orderId}\n` +
+        `🆔 *Order:* #${orderId}\n` +
         `━━━━━━━━━━━━━━━━━━━━━\n` +
-        `_Responda para atender este pedido!_`
+        `_Reply to handle this order!_`
       );
     }
 
@@ -2367,17 +2360,17 @@ export class ChatwootService {
               const pixKeyType = (() => {
                 switch (pixSettings.key_type) {
                   case 'EVP':
-                    return 'Chave Aleatória';
+                    return 'Random Key';
                   case 'EMAIL':
-                    return 'E-mail';
+                    return 'Email';
                   case 'PHONE':
-                    return 'Telefone';
+                    return 'Phone';
                   default:
                     return pixSettings.key_type;
                 }
               })();
               const pixKey = pixSettings.key_type === 'PHONE' ? pixSettings.key.replace('+55', '') : pixSettings.key;
-              const content = `*${pixSettings.merchant_name}*\nChave PIX: ${pixKey} (${pixKeyType})`;
+              const content = `*${pixSettings.merchant_name}*\nPIX Key: ${pixKey} (${pixKeyType})`;
 
               const send = await this.createMessage(
                 instance,
@@ -2553,7 +2546,7 @@ export class ChatwootService {
         const editedMessageContent = (editedMessageContentRaw ?? '').trim();
 
         if (!editedMessageContent) {
-          this.logger.info('[CW.EDIT] Conteúdo vazio — ignorando (DELETE tratará se for revoke).');
+          this.logger.info('[CW.EDIT] Empty content — ignoring (DELETE will handle revoke).');
           return;
         }
 

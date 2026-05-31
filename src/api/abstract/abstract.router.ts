@@ -48,12 +48,19 @@ export abstract class RouterBroker {
     const body = request.body;
     const instance = request.params as unknown as InstanceDto;
 
+    const isInstanceCreate = request.originalUrl.includes('/instance/create');
+
     if (request?.query && Object.keys(request.query).length > 0) {
       Object.assign(instance, sanitizeUntrustedInput(request.query as Record<string, any>));
     }
 
-    if (request.originalUrl.includes('/instance/create')) {
-      Object.assign(instance, sanitizeUntrustedInput(body));
+    if (isInstanceCreate) {
+      // /instance/create is gated by the global API key, not by per-instance
+      // auth, so there is no authenticated instanceName to protect from
+      // body override here — the body IS the legitimate source for it.
+      // Sanitizing in this branch (the original #2549 fix) made `name`
+      // arrive at Prisma as undefined.
+      Object.assign(instance, body);
     }
 
     Object.assign(ref, body);

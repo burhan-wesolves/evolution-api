@@ -217,6 +217,7 @@ export const instanceSchema: JSONSchema7 = {
     chatwootImportMessages: { type: 'boolean' },
     chatwootDaysLimitImportMessages: { type: 'number' },
   },
+  required: ['instanceName'],
   ...isNotEmpty('instanceName'),
 };
 

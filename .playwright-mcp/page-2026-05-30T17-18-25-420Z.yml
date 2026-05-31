@@ -1,0 +1,130 @@
+- generic:
+  - generic:
+    - generic:
+      - complementary:
+        - generic:
+          - img
+        - navigation:
+          - link:
+            - /url: /manager
+            - img
+            - generic: ← Instances
+          - link:
+            - /url: /manager/instance/131b003c-44aa-435e-847a-cb900f428a56/dashboard
+            - img
+            - generic: Dashboard
+          - link:
+            - /url: /manager/instance/131b003c-44aa-435e-847a-cb900f428a56/chat
+            - img
+            - generic: Chat
+          - generic:
+            - button:
+              - img
+              - generic: Configurations
+              - img
+          - generic:
+            - button:
+              - img
+              - generic: Events
+              - img
+          - generic:
+            - button:
+              - img
+              - generic: Integrations
+              - img
+        - generic:
+          - link:
+            - /url: https://docs.evolutionfoundation.com.br/
+            - img
+            - generic: Documentation
+          - link:
+            - /url: https://evolution-api.com/postman
+            - img
+            - generic: Postman
+          - link:
+            - /url: https://evolution-api.com/discord
+            - img
+            - generic: Discord
+        - generic:
+          - generic: Evolution Manager
+          - generic: © 2026 All rights reserved
+      - generic:
+        - banner:
+          - generic:
+            - generic:
+              - generic:
+                - img
+              - generic: snap-testing
+            - button:
+              - img
+              - generic: Toggle theme
+            - button:
+              - img
+              - generic: Toggle theme
+            - button:
+              - img
+              - text: Sign out
+        - main:
+          - generic:
+            - generic:
+              - generic:
+                - generic:
+                  - heading [level=1]: snap-testing
+                  - paragraph: Manage your instance
+              - generic:
+                - generic:
+                  - button:
+                    - generic:
+                      - img
+                    - text: Refresh
+                  - button:
+                    - generic:
+                      - img
+                    - text: Restart
+            - generic:
+              - generic:
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: snap-testing
+                    - generic: Connecting
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic: "************-****-****-************"
+                      - button:
+                        - img
+                      - button:
+                        - img
+                  - alert:
+                    - generic: To connect, scan the QR code with your WhatsApp Web
+                    - generic:
+                      - button [expanded]:
+                        - img
+                        - text: Get QR Code
+              - generic:
+                - generic:
+                  - generic:
+                    - generic:
+                      - img
+                      - text: Contacts
+                  - generic: "0"
+                - generic:
+                  - generic:
+                    - generic:
+                      - img
+                      - text: Chats
+                  - generic: "0"
+                - generic:
+                  - generic:
+                    - generic:
+                      - img
+                      - text: Messages
+                  - generic: "0"
+  - dialog [ref=e247]:
+    - generic [ref=e248]: Scan the QR code with your WhatsApp Web
+    - img [ref=e250]
+    - button "Close" [active] [ref=e253]:
+      - img
+      - generic [ref=e254]: Close

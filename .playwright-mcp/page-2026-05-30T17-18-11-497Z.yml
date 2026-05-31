@@ -1,0 +1,108 @@
+- generic [ref=e107]:
+  - complementary [ref=e108]:
+    - img "Evolution API" [ref=e110]
+    - navigation [ref=e111]:
+      - link "← Instances" [ref=e112] [cursor=pointer]:
+        - /url: /manager
+        - img [ref=e113]
+        - generic [ref=e118]: ← Instances
+      - link "Dashboard" [ref=e120] [cursor=pointer]:
+        - /url: /manager/instance/131b003c-44aa-435e-847a-cb900f428a56/dashboard
+        - img [ref=e121]
+        - generic [ref=e126]: Dashboard
+      - link "Chat" [ref=e127] [cursor=pointer]:
+        - /url: /manager/instance/131b003c-44aa-435e-847a-cb900f428a56/chat
+        - img [ref=e128]
+        - generic [ref=e130]: Chat
+      - button "Configurations" [ref=e132]:
+        - img [ref=e133]
+        - generic [ref=e144]: Configurations
+        - img [ref=e145]
+      - button "Events" [ref=e148]:
+        - img [ref=e149]
+        - generic [ref=e152]: Events
+        - img [ref=e153]
+      - button "Integrations" [ref=e156]:
+        - img [ref=e157]
+        - generic [ref=e159]: Integrations
+        - img [ref=e160]
+    - generic [ref=e162]:
+      - link "Documentation" [ref=e163] [cursor=pointer]:
+        - /url: https://docs.evolutionfoundation.com.br/
+        - img [ref=e164]
+        - generic [ref=e167]: Documentation
+      - link "Postman" [ref=e168] [cursor=pointer]:
+        - /url: https://evolution-api.com/postman
+        - img [ref=e169]
+        - generic [ref=e172]: Postman
+      - link "Discord" [ref=e173] [cursor=pointer]:
+        - /url: https://evolution-api.com/discord
+        - img [ref=e174]
+        - generic [ref=e176]: Discord
+    - generic [ref=e177]:
+      - generic [ref=e178]: Evolution Manager
+      - generic [ref=e179]: © 2026 All rights reserved
+  - generic [ref=e180]:
+    - banner [ref=e181]:
+      - generic [ref=e182]:
+        - generic [ref=e183]:
+          - img "snap-testing" [ref=e185]
+          - generic [ref=e186]: snap-testing
+        - button "Toggle theme" [ref=e187]:
+          - img
+          - generic [ref=e188]: Toggle theme
+        - button "Toggle theme" [ref=e189]:
+          - img
+          - img
+          - generic [ref=e190]: Toggle theme
+        - button "Sign out" [ref=e191]:
+          - img
+          - text: Sign out
+    - main [ref=e192]:
+      - generic [ref=e193]:
+        - generic [ref=e194]:
+          - generic [ref=e196]:
+            - heading "snap-testing" [level=1] [ref=e197]
+            - paragraph [ref=e198]: Manage your instance
+          - generic [ref=e200]:
+            - button "Refresh" [ref=e201]:
+              - generic [ref=e202]:
+                - img
+              - text: Refresh
+            - button "Restart" [ref=e203]:
+              - generic [ref=e204]:
+                - img
+              - text: Restart
+        - generic [ref=e205]:
+          - generic [ref=e206]:
+            - generic [ref=e208]:
+              - generic [ref=e211]: snap-testing
+              - generic [ref=e212]: Connecting
+            - generic [ref=e213]:
+              - generic [ref=e215]:
+                - generic [ref=e216]: "************-****-****-************"
+                - button [ref=e217]:
+                  - img
+                - button [ref=e218]:
+                  - img
+              - alert [ref=e219]:
+                - generic [ref=e220]: To connect, scan the QR code with your WhatsApp Web
+                - button "Get QR Code" [ref=e222]:
+                  - img
+                  - text: Get QR Code
+          - generic [ref=e223]:
+            - generic [ref=e224]:
+              - generic [ref=e226]:
+                - img [ref=e227]
+                - text: Contacts
+              - generic [ref=e231]: "0"
+            - generic [ref=e232]:
+              - generic [ref=e234]:
+                - img [ref=e235]
+                - text: Chats
+              - generic [ref=e239]: "0"
+            - generic [ref=e240]:
+              - generic [ref=e242]:
+                - img [ref=e243]
+                - text: Messages
+              - generic [ref=e245]: "0"

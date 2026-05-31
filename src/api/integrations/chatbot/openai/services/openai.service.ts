@@ -711,9 +711,7 @@ export class OpenaiService extends BaseChatbotService<OpenaiBot, OpenaiSetting> 
       );
     }
 
-    const lang = this.configService.get<Language>('LANGUAGE').includes('pt')
-      ? 'pt'
-      : this.configService.get<Language>('LANGUAGE');
+    const lang = this.configService.get<Language>('LANGUAGE');
 
     const formData = new FormData();
     formData.append('file', audio, 'audio.ogg');

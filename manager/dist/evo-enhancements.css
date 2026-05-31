@@ -1,0 +1,78 @@
+/* Manager UI enhancements — layered on top of the compiled bundle.
+   Provides explicit hover / active feedback the bundled bare button
+   styles don't carry, plus styles for the request-in-flight bar
+   injected by evo-enhancements.js. */
+
+button:not([disabled]):not([aria-disabled='true']) {
+  transition:
+    transform 0.12s ease,
+    filter 0.12s ease,
+    box-shadow 0.12s ease,
+    background-color 0.12s ease;
+}
+
+button:not([disabled]):not([aria-disabled='true']):hover {
+  cursor: pointer;
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+}
+
+button:not([disabled]):not([aria-disabled='true']):active {
+  transform: translateY(0);
+  filter: brightness(0.92);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+
+button[disabled],
+button[aria-disabled='true'] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+#__evo_loader_bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, #10b981 0%, #34d399 30%, #10b981 60%, #34d399 100%);
+  background-size: 200% 100%;
+  z-index: 99999;
+  transform: translateY(-100%);
+  transition: transform 0.18s ease;
+  pointer-events: none;
+}
+
+#__evo_loader_bar.__active {
+  transform: translateY(0);
+  animation: __evo_loader_slide 1.2s linear infinite;
+}
+
+@keyframes __evo_loader_slide {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+button[data-evo-busy='true']::after {
+  content: '';
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  margin-left: 0.5em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: -0.15em;
+  animation: __evo_spin 0.7s linear infinite;
+}
+
+@keyframes __evo_spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

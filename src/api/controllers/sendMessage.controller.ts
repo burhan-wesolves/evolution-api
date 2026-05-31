@@ -70,7 +70,7 @@ export class SendMessageController {
       // Si file existe y tiene buffer, o si es una URL o Base64, continúa
       return await this.waMonitor.waInstances[instanceName].audioWhatsapp(data, file);
     } else {
-      console.error('El archivo no tiene buffer o el audio no es una URL o Base64 válida');
+      console.error('File has no buffer, or audio is not a valid URL/Base64');
       throw new BadRequestException('Owned media must be a url, base64, or valid file with buffer');
     }
   }

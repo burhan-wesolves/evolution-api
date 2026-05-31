@@ -218,7 +218,7 @@ async function getVideoDuration(input: Buffer | string | Readable): Promise<numb
       return data.slice(offset, offset + size);
     };
   } else {
-    throw new Error('Tipo de entrada não suportado');
+    throw new Error('Unsupported input type');
   }
 
   const result = await mediainfo.analyzeData(() => fileSize, readChunk);
@@ -262,6 +262,7 @@ export class BaileysStartupService extends ChannelStartupService {
   private readonly userDevicesCache: CacheStore = new NodeCache({ stdTTL: 300000, useClones: false });
   private endSession = false;
   private isDeleting = false; // Flag to prevent reconnection during deletion
+  private reconnectTimeout?: NodeJS.Timeout;
   private logBaileys = this.configService.get<Log>('LOG').BAILEYS;
   private eventProcessingQueue: Promise<void> = Promise.resolve();
   private _lastStream515At = 0;
@@ -291,6 +292,59 @@ export class BaileysStartupService extends ChannelStartupService {
     return this.stateConnection;
   }
 
+  private clearReconnectTimeout() {
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = undefined;
+    }
+  }
+
+  private async closeActiveClient(reason: string) {
+    this.clearReconnectTimeout();
+    // Invalidate the cached QR so a follow-up `connectToWhatsapp` cannot return
+    // the previous socket's stale QR — that's what made WhatsApp reject the
+    // scan ("same QR shown again and again"). Keep `count` so the QRCODE.LIMIT
+    // gate still works across retries.
+    if (this.instance.qrcode) {
+      this.instance.qrcode.base64 = undefined;
+      this.instance.qrcode.code = undefined;
+      this.instance.qrcode.pairingCode = undefined;
+    }
+    if (!this.client) return;
+    try {
+      this.client.ws?.close();
+      this.client.end(new Error(reason));
+    } catch {
+      // Ignore teardown races when the socket is already closed.
+    }
+  }
+
+  private async removePersistedCreds(): Promise<void> {
+    const db = this.configService.get<Database>('DATABASE');
+    const cache = this.configService.get<CacheConf>('CACHE');
+    const provider = this.configService.get<ProviderSession>('PROVIDER');
+
+    if (provider?.ENABLED) {
+      const authState = await this.authStateProvider.authStateProvider(this.instance.id);
+      await authState.removeCreds();
+    }
+
+    if (cache?.REDIS.ENABLED && cache?.REDIS.SAVE_INSTANCES) {
+      const authState = await useMultiFileAuthStateRedisDb(this.instance.id, this.cache);
+      await authState.removeCreds();
+    }
+
+    if (db.SAVE_DATA.INSTANCE) {
+      const authState = await useMultiFileAuthStatePrisma(this.instance.id, this.cache);
+      await authState.removeCreds();
+    }
+
+    const sessionExists = await this.prismaRepository.session.findFirst({ where: { sessionId: this.instanceId } });
+    if (sessionExists) {
+      await this.prismaRepository.session.delete({ where: { sessionId: this.instanceId } });
+    }
+  }
+
   public async logoutInstance() {
     // Mark instance as deleting to prevent reconnection attempts.
     this.isDeleting = true;
@@ -298,23 +352,51 @@ export class BaileysStartupService extends ChannelStartupService {
 
     this.messageProcessor.onDestroy();
 
+    let baileysLogoutSucceeded = false;
     if (this.client) {
-      try {
-        await this.client.logout('Log out instance: ' + this.instanceName);
-      } catch (error) {
-        // Downgraded to warn: logout failures here are recoverable — the
-        // credential cleanup below still runs and the DB row is forced to 'close'.
-        this.logger.warn(
-          `logoutInstance: client.logout() failed (${(error as Error)?.message}), proceeding with credential cleanup`,
-        );
+      // Baileys' logout() writes a `remove-companion-device` IQ stanza to the
+      // WS buffer and then immediately calls end() to close it. If we race
+      // against the WS flush, the IQ never reaches WhatsApp's servers and the
+      // phone's Linked Devices list still shows the session. Two safeguards:
+      //   1. only call logout() while the WS is actually open
+      //   2. await a brief flush window so the IQ leaves the host before we
+      //      let anything else touch the socket.
+      const wsState = (this.client.ws as any)?.readyState;
+      const WS_OPEN = 1;
+      if (wsState === WS_OPEN) {
+        try {
+          await this.client.logout('Log out instance: ' + this.instanceName);
+          baileysLogoutSucceeded = true;
+          // Give the OS ~600 ms to flush the IQ stanza to WhatsApp before any
+          // further forced socket teardown can drop it.
+          await new Promise((resolve) => setTimeout(resolve, 600));
+        } catch (error) {
+          this.logger.error({
+            msg: 'logoutInstance: client.logout() failed — WhatsApp may still show this device as linked. Unlink manually from your phone if needed.',
+            instanceName: this.instance.name,
+            error: (error as Error)?.message,
+          });
+        }
+      } else {
+        // WS was already closing/closed before user clicked Disconnect — no
+        // way to deliver the unlink signal. Surface this so the operator
+        // knows the WhatsApp-side session won't be revoked automatically.
+        this.logger.warn({
+          msg: 'logoutInstance: WS was not open — skipping client.logout(). WhatsApp linked-device entry will NOT be revoked; unlink it manually from the phone.',
+          instanceName: this.instance.name,
+          wsState,
+        });
       }
 
-      // Improved socket cleanup.
-      try {
-        this.client.ws?.close();
-        this.client.end(new Error('Instance logout'));
-      } catch {
-        // ignore — ws may already be closed
+      if (!baileysLogoutSucceeded) {
+        // Force-close only when Baileys' own logout didn't already tear the
+        // socket down — otherwise this races with the IQ flush above.
+        try {
+          this.client.ws?.close();
+          this.client.end(new Error('Instance logout'));
+        } catch {
+          // ignore — ws may already be closed
+        }
       }
     }
 
@@ -323,32 +405,7 @@ export class BaileysStartupService extends ChannelStartupService {
     // is delayed.
     this.stateConnection = { state: 'close', statusReason: 401 };
 
-    const db = this.configService.get<Database>('DATABASE');
-    const cache = this.configService.get<CacheConf>('CACHE');
-    const provider = this.configService.get<ProviderSession>('PROVIDER');
-
-    if (provider?.ENABLED) {
-      const authState = await this.authStateProvider.authStateProvider(this.instance.id);
-
-      await authState.removeCreds();
-    }
-
-    if (cache?.REDIS.ENABLED && cache?.REDIS.SAVE_INSTANCES) {
-      const authState = await useMultiFileAuthStateRedisDb(this.instance.id, this.cache);
-
-      await authState.removeCreds();
-    }
-
-    if (db.SAVE_DATA.INSTANCE) {
-      const authState = await useMultiFileAuthStatePrisma(this.instance.id, this.cache);
-
-      await authState.removeCreds();
-    }
-
-    const sessionExists = await this.prismaRepository.session.findFirst({ where: { sessionId: this.instanceId } });
-    if (sessionExists) {
-      await this.prismaRepository.session.delete({ where: { sessionId: this.instanceId } });
-    }
+    await this.removePersistedCreds();
 
     await this.prismaRepository.instance.update({
       where: { id: this.instanceId },
@@ -505,19 +562,39 @@ export class BaileysStartupService extends ChannelStartupService {
       // transient network drops where the server returned a 408 in the close.
       const codesToNotReconnect = [DisconnectReason.loggedOut, DisconnectReason.forbidden, 402, 406, 408];
 
-      // FIX: Do not reconnect if it's the initial connection (waiting for QR code)
-      // This prevents infinite loop that blocks QR code generation
-      const isInitialConnection = !this.instance.wuid && (this.instance.qrcode?.count ?? 0) === 0;
+      const recentStream515 = Date.now() - this._lastStream515At < BaileysStartupService.STREAM_515_RECONNECT_GRACE_MS;
 
-      if (isInitialConnection) {
-        this.logger.info('Initial connection closed, waiting for QR code generation...');
+      // A close before the instance has authenticated (no wuid yet) usually
+      // means: QR session timed out / user closed the manager / WhatsApp
+      // rejected the pair. Auto-reconnecting in that case spins up a new QR
+      // before the user can scan the current one — the "Get QR Code keeps
+      // refreshing" loop. We stop and wait for an explicit user retry.
+      //
+      // EXCEPTION: stream:error 515 is part of the *normal* QR-scan handshake
+      // — Baileys closes the pairing socket with restartRequired before
+      // emitting `connection: 'open'`, so wuid is still undefined here. We
+      // must let that close fall through to the reconnect branch.
+      const isPreAuthClose = !this.instance.wuid && !recentStream515;
+
+      if (isPreAuthClose) {
+        this.logger.info('Pre-auth connection closed, waiting for explicit QR refresh...');
+        this.clearReconnectTimeout();
+        this.stateConnection = {
+          state: 'close',
+          statusReason: statusCode ?? DisconnectReason.connectionClosed,
+        };
+        await this.prismaRepository.instance.update({
+          where: { id: this.instanceId },
+          data: {
+            connectionStatus: 'close',
+            disconnectionAt: new Date(),
+            disconnectionReasonCode: statusCode ?? DisconnectReason.connectionClosed,
+            disconnectionObject: JSON.stringify(lastDisconnect ?? null),
+          },
+        });
         return;
       }
 
-      // If a stream:error 515 (Baileys' "restart needed" handshake) just fired,
-      // a follow-up loggedOut is the expected restart signal — not an actual
-      // logout — so reconnect anyway.
-      const recentStream515 = Date.now() - this._lastStream515At < BaileysStartupService.STREAM_515_RECONNECT_GRACE_MS;
       const shouldReconnect =
         !codesToNotReconnect.includes(statusCode) || (statusCode === DisconnectReason.loggedOut && recentStream515);
 
@@ -531,10 +608,12 @@ export class BaileysStartupService extends ChannelStartupService {
       if (shouldReconnect) {
         // Add 3 second delay before reconnection to prevent rapid reconnection loops
         this.logger.info('Reconnecting in 3 seconds...');
-        setTimeout(async () => {
+        this.clearReconnectTimeout();
+        this.reconnectTimeout = setTimeout(async () => {
           await this.connectToWhatsapp(this.phoneNumber);
         }, 3000);
       } else {
+        this.clearReconnectTimeout();
         this.logger.info(`Skipping reconnection for status code ${statusCode} (code is in codesToNotReconnect list)`);
         this.sendDataWebhook(Events.STATUS_INSTANCE, {
           instance: this.instance.name,
@@ -563,8 +642,7 @@ export class BaileysStartupService extends ChannelStartupService {
         }
 
         this.eventEmitter.emit('logout.instance', this.instance.name, 'inner');
-        this.client?.ws?.close();
-        this.client.end(new Error('Close connection'));
+        await this.closeActiveClient('Close connection');
 
         this.sendDataWebhook(Events.CONNECTION_UPDATE, { instance: this.instance.name, ...this.stateConnection });
       }
@@ -604,6 +682,10 @@ export class BaileysStartupService extends ChannelStartupService {
           profileName: (await this.getProfileName()) as string,
           profilePicUrl: this.instance.profilePictureUrl,
           connectionStatus: 'open',
+          // Clear so stale "loggedOut" doesn't trigger a creds-wipe on the
+          // next reconnect cycle (Baileys 515 restart).
+          disconnectionReasonCode: null,
+          disconnectionObject: null,
         },
       });
 
@@ -699,6 +781,37 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   private async createClient(number?: string): Promise<WASocket> {
+    await this.closeActiveClient('Recreate connection');
+
+    // If the previous session ended with creds-no-longer-valid (loggedOut from
+    // the phone, forbidden, replaced by another device), the persisted creds
+    // are dead — reusing them would trigger an instant 401 from WhatsApp and
+    // our pre-auth-close branch would stop before any QR could be emitted.
+    // Wipe them so this connect starts as a fresh login → fresh QR. The DB
+    // row is the source of truth after a server restart (in-memory state is
+    // reset to { state: 'close' } with no statusReason).
+    let priorReason: number | null | undefined = this.stateConnection.statusReason;
+    if (priorReason === undefined || priorReason === null) {
+      try {
+        const row = await this.prismaRepository.instance.findUnique({
+          where: { id: this.instanceId },
+          select: { disconnectionReasonCode: true },
+        });
+        priorReason = row?.disconnectionReasonCode ?? undefined;
+      } catch {
+        // Best-effort — fall through to normal connect.
+      }
+    }
+    if (
+      priorReason === DisconnectReason.loggedOut ||
+      priorReason === DisconnectReason.forbidden ||
+      priorReason === DisconnectReason.connectionReplaced
+    ) {
+      this.logger.info(`Wiping stale creds before reconnect (prior statusReason=${priorReason})`);
+      await this.removePersistedCreds();
+      this.stateConnection = { state: 'close' };
+    }
+
     this.instance.authState = await this.defineAuthState();
 
     if (number) {
@@ -3253,7 +3366,7 @@ export class BaileysStartupService extends ChannelStartupService {
         return await sharp(imageBuffer).webp().toBuffer();
       }
     } catch (error) {
-      console.error('Erro ao converter a imagem para WebP:', error);
+      console.error('Error converting image to WebP:', error);
       throw error;
     }
   }
@@ -4198,7 +4311,7 @@ export class BaileysStartupService extends ChannelStartupService {
     });
 
     if (numbersToCache.length > 0) {
-      this.logger.verbose(`Salvando ${numbersToCache.length} números no cache`);
+      this.logger.verbose(`Caching ${numbersToCache.length} numbers`);
       await saveOnWhatsappCache(
         numbersToCache.map((user) => ({
           remoteJid: user.jid,
@@ -5224,7 +5337,7 @@ export class BaileysStartupService extends ChannelStartupService {
       pushName:
         message.pushName ||
         (message.key.fromMe
-          ? 'Você'
+          ? 'You'
           : message?.participant || (message.key?.participant ? message.key.participant.split('@')[0] : null)),
       message: this.deserializeMessageBuffers({ ...message.message }),
       messageType: getContentType(message.message),
@@ -5744,7 +5857,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
       if (!message.pushName) {
         if (messageKey.fromMe) {
-          message.pushName = 'Você';
+          message.pushName = 'You';
         } else if (message.contextInfo) {
           const contextInfo = message.contextInfo as { participant?: string };
           if (contextInfo.participant) {

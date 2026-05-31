@@ -239,8 +239,8 @@ export class WAMonitoringService {
   }
 
   public async saveInstance(data: any) {
+    const clientName = await this.configService.get<Database>('DATABASE').CONNECTION.CLIENT_NAME;
     try {
-      const clientName = await this.configService.get<Database>('DATABASE').CONNECTION.CLIENT_NAME;
       await this.prismaRepository.instance.create({
         data: {
           id: data.instanceId,
@@ -258,7 +258,12 @@ export class WAMonitoringService {
         },
       });
     } catch (error) {
-      this.logger.error(error);
+      // Surface the real cause instead of letting subsequent steps (Setting upsert,
+      // event manager wiring) fail with a misleading FK violation on a row that
+      // was never inserted. The previous silent log made every schema/unique
+      // collision look like "Setting_instanceId_fkey violated" downstream.
+      this.logger.error({ message: 'saveInstance failed', instanceName: data.instanceName, error });
+      throw error;
     }
   }
 

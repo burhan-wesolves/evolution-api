@@ -24,7 +24,6 @@
       "@config/*": ["./src/config/*"],
       "@exceptions": ["./src/exceptions"],
       "@libs/*": ["./src/libs/*"],
-      "@licensing/*": ["./src/licensing/*"],
       "@utils/*": ["./src/utils/*"],
       "@validate/*": ["./src/validate/*"]
     },

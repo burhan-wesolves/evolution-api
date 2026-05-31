@@ -22,8 +22,23 @@ async function getInstance(instanceName: string) {
   }
 }
 
+// Paramless aliases used by the modern Manager UI bundle. The instance is
+// identified by the per-instance token in the apikey header — authGuard
+// populates req.params.instanceName during its check.
+const PARAMLESS_INSTANCE_ROUTES = ['/instance/reconnect', '/instance/logout', '/instance/qr', '/instance/all'];
+
+function isParamlessAliasRoute(url: string): boolean {
+  // Strip query string before matching so /instance/qr?foo=bar still hits.
+  const path = url.split('?')[0];
+  return PARAMLESS_INSTANCE_ROUTES.includes(path);
+}
+
 export async function instanceExistsGuard(req: Request, _: Response, next: NextFunction) {
-  if (req.originalUrl.includes('/instance/create') || req.originalUrl.includes('/instance/fetchInstances')) {
+  if (
+    req.originalUrl.includes('/instance/create') ||
+    req.originalUrl.includes('/instance/fetchInstances') ||
+    isParamlessAliasRoute(req.originalUrl)
+  ) {
     return next();
   }
 

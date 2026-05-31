@@ -1,0 +1,112 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - img "Evolution API" [ref=e6]
+    - navigation [ref=e7]:
+      - link "← Instances" [ref=e8] [cursor=pointer]:
+        - /url: /manager
+        - img [ref=e9]
+        - generic [ref=e14]: ← Instances
+      - link "Dashboard" [ref=e16] [cursor=pointer]:
+        - /url: /manager/instance/131b003c-44aa-435e-847a-cb900f428a56/dashboard
+        - img [ref=e17]
+        - generic [ref=e22]: Dashboard
+      - link "Chat" [ref=e23] [cursor=pointer]:
+        - /url: /manager/instance/131b003c-44aa-435e-847a-cb900f428a56/chat
+        - img [ref=e24]
+        - generic [ref=e26]: Chat
+      - button "Configurations" [ref=e28]:
+        - img [ref=e29]
+        - generic [ref=e40]: Configurations
+        - img [ref=e41]
+      - button "Events" [ref=e44]:
+        - img [ref=e45]
+        - generic [ref=e48]: Events
+        - img [ref=e49]
+      - button "Integrations" [ref=e52]:
+        - img [ref=e53]
+        - generic [ref=e55]: Integrations
+        - img [ref=e56]
+    - generic [ref=e58]:
+      - link "Documentation" [ref=e59] [cursor=pointer]:
+        - /url: https://docs.evolutionfoundation.com.br/
+        - img [ref=e60]
+        - generic [ref=e63]: Documentation
+      - link "Postman" [ref=e64] [cursor=pointer]:
+        - /url: https://evolution-api.com/postman
+        - img [ref=e65]
+        - generic [ref=e68]: Postman
+      - link "Discord" [ref=e69] [cursor=pointer]:
+        - /url: https://evolution-api.com/discord
+        - img [ref=e70]
+        - generic [ref=e72]: Discord
+    - generic [ref=e73]:
+      - generic [ref=e74]: Evolution Manager
+      - generic [ref=e75]: © 2026 All rights reserved
+  - generic [ref=e76]:
+    - banner [ref=e77]:
+      - generic [ref=e78]:
+        - generic [ref=e88]:
+          - img "snap-testing" [ref=e90]
+          - generic [ref=e91]: snapexpenses
+        - button "Toggle theme" [ref=e79]:
+          - img
+          - generic [ref=e80]: Toggle theme
+        - button "Toggle theme" [ref=e81]:
+          - img
+          - img
+          - generic [ref=e82]: Toggle theme
+        - button "Sign out" [ref=e83]:
+          - img
+          - text: Sign out
+    - main [ref=e84]:
+      - generic [ref=e92]:
+        - generic [ref=e93]:
+          - generic [ref=e95]:
+            - heading "snap-testing" [level=1] [ref=e96]
+            - paragraph [ref=e97]: snapexpenses
+          - generic [ref=e99]:
+            - button "Refresh" [active] [ref=e100]:
+              - generic [ref=e101]:
+                - img
+              - text: Refresh
+            - button "Restart" [ref=e102]:
+              - generic [ref=e103]:
+                - img
+              - text: Restart
+        - generic [ref=e104]:
+          - generic [ref=e105]:
+            - generic [ref=e107]:
+              - generic [ref=e108]:
+                - img "snap-testing" [ref=e110]
+                - generic [ref=e111]:
+                  - generic [ref=e112]: snapexpenses
+                  - paragraph [ref=e113]: "918297415253"
+              - generic [ref=e114]: Connecting
+            - generic [ref=e115]:
+              - generic [ref=e117]:
+                - generic [ref=e118]: "************-****-****-************"
+                - button [ref=e119]:
+                  - img
+                - button [ref=e120]:
+                  - img
+              - alert [ref=e121]:
+                - generic [ref=e122]: To connect, scan the QR code with your WhatsApp Web
+                - button "Get QR Code" [ref=e124]:
+                  - img
+                  - text: Get QR Code
+          - generic [ref=e125]:
+            - generic [ref=e126]:
+              - generic [ref=e128]:
+                - img [ref=e129]
+                - text: Contacts
+              - generic [ref=e133]: "4"
+            - generic [ref=e134]:
+              - generic [ref=e136]:
+                - img [ref=e137]
+                - text: Chats
+              - generic [ref=e141]: "9"
+            - generic [ref=e142]:
+              - generic [ref=e144]:
+                - img [ref=e145]
+                - text: Messages
+              - generic [ref=e147]: "634"
