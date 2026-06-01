@@ -3814,22 +3814,33 @@ export class BaileysStartupService extends ChannelStartupService {
       throw new BadRequestException('At least one button is required');
     }
 
-    const hasReplyButtons = data.buttons.some((btn) => btn.type === 'reply');
+    const replyCount = data.buttons.filter((btn) => btn.type === 'reply').length;
+    const ctaCount = data.buttons.filter(
+      (btn) => btn.type === 'url' || btn.type === 'call' || btn.type === 'copy',
+    ).length;
+    const hasReplyButtons = replyCount > 0;
     const hasPixButton = data.buttons.some((btn) => btn.type === 'pix');
-    const hasCTAButtons = data.buttons.some((btn) => btn.type === 'url' || btn.type === 'call' || btn.type === 'copy');
+    const hasCTAButtons = ctaCount > 0;
 
     /* =========================
      * REGRAS DE VALIDAÇÃO
+     *
+     * WhatsApp's native_flow with name="mixed" (see buildInteractiveBizNode)
+     * renders quick_reply + cta_url + cta_call + cta_copy together. PIX
+     * (`payment_info`) uses a different template and must travel alone.
      * ========================= */
 
-    // Reply
-    if (hasReplyButtons) {
-      if (data.buttons.length > 3) {
-        throw new BadRequestException('Maximum of 3 reply buttons allowed');
-      }
-      if (hasCTAButtons || hasPixButton) {
-        throw new BadRequestException('Reply buttons cannot be mixed with CTA or PIX buttons');
-      }
+    // Per-type ceilings on a mixed message — keep within WhatsApp's
+    // rendered limits (quick_reply ≤ 3, CTA ≤ 2) and cap the total so the
+    // UI doesn't truncate.
+    if (replyCount > 3) {
+      throw new BadRequestException('Maximum of 3 reply buttons allowed');
+    }
+    if (ctaCount > 2) {
+      throw new BadRequestException('Maximum of 2 CTA buttons allowed (url/call/copy)');
+    }
+    if (replyCount + ctaCount > 5) {
+      throw new BadRequestException('Maximum of 5 buttons allowed in a single message');
     }
 
     // PIX
@@ -3873,15 +3884,9 @@ export class BaileysStartupService extends ChannelStartupService {
       );
     }
 
-    // CTA (url / call / copy)
-    if (hasCTAButtons) {
-      if (data.buttons.length > 2) {
-        throw new BadRequestException('Maximum of 2 CTA buttons allowed');
-      }
-      if (hasReplyButtons) {
-        throw new BadRequestException('CTA buttons cannot be mixed with reply buttons');
-      }
-    }
+    // CTA / mixed validation is handled in the per-type ceilings above; no
+    // additional restriction here so reply + CTA can ship in the same
+    // native_flow `mixed` message.
 
     /* =========================
      * HEADER (opcional)

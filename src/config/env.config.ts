@@ -315,6 +315,12 @@ export type Webhook = {
     JITTER_FACTOR?: number;
     NON_RETRYABLE_STATUS_CODES?: number[];
   };
+  HISTORY?: {
+    ENABLED?: boolean;
+    MAX_ENTRIES_PER_INSTANCE?: number;
+    CAPTURE_RESPONSE_BODY?: boolean;
+    RESPONSE_BODY_MAX_BYTES?: number;
+  };
 };
 export type Pusher = { ENABLED: boolean; GLOBAL?: GlobalPusher; EVENTS: EventsPusher };
 export type ConfigSessionPhone = { CLIENT: string; NAME: string };
@@ -807,6 +813,12 @@ export class ConfigService {
           NON_RETRYABLE_STATUS_CODES: process.env?.WEBHOOK_RETRY_NON_RETRYABLE_STATUS_CODES?.split(',').map(Number) || [
             400, 401, 403, 404, 422,
           ],
+        },
+        HISTORY: {
+          ENABLED: process.env?.WEBHOOK_HISTORY_ENABLED !== 'false',
+          MAX_ENTRIES_PER_INSTANCE: Number.parseInt(process.env?.WEBHOOK_HISTORY_MAX_ENTRIES_PER_INSTANCE) || 500,
+          CAPTURE_RESPONSE_BODY: process.env?.WEBHOOK_HISTORY_CAPTURE_RESPONSE_BODY !== 'false',
+          RESPONSE_BODY_MAX_BYTES: Number.parseInt(process.env?.WEBHOOK_HISTORY_RESPONSE_BODY_MAX_BYTES) || 4096,
         },
       },
       CONFIG_SESSION_PHONE: {

@@ -65,6 +65,16 @@ export abstract class RouterBroker {
 
     Object.assign(ref, body);
 
+    // The schema-validated `ref` must carry the URL-derived instanceName so
+    // GET routes (whose body is empty) can still satisfy
+    // `required: ['instanceName']` in instanceSchema. Done AFTER body merge
+    // so the URL param is authoritative and an attacker can't slip a
+    // mismatched instanceName via body — the auth guard already validated
+    // the param-derived name.
+    if (request.params?.instanceName) {
+      (ref as any).instanceName = request.params.instanceName;
+    }
+
     const v = schema ? validate(ref, schema) : { valid: true, errors: [] };
 
     if (!v.valid) {

@@ -5,10 +5,11 @@ import { wa } from '@api/types/wa.types';
 import { configService, Log, Webhook } from '@config/env.config';
 import { Logger } from '@config/logger.config';
 // import { BadRequestException } from '@exceptions';
-import axios, { AxiosInstance } from 'axios';
+import axios, { AxiosInstance, AxiosResponse } from 'axios';
 import * as jwt from 'jsonwebtoken';
 
 import { EmitData, EventController, EventControllerInterface } from '../event.controller';
+import { WebhookHistoryEntry, webhookHistoryService, WebhookHistoryStatus } from './webhook.history.service';
 
 export class WebhookController extends EventController implements EventControllerInterface {
   private readonly logger = new Logger('WebhookController');
@@ -22,32 +23,52 @@ export class WebhookController extends EventController implements EventControlle
     //   throw new BadRequestException('Invalid "url" property');
     // }
 
-    if (!data.webhook?.enabled) {
-      data.webhook.events = [];
+    const incoming = data.webhook ?? ({} as NonNullable<EventDto['webhook']>);
+    const enabled = incoming.enabled ?? false;
+    const currentEvents = Array.isArray(incoming.events) ? incoming.events : [];
+
+    let normalizedEvents: string[];
+    if (!enabled) {
+      // Preserve the existing events list when the webhook is just being
+      // toggled off — otherwise the user has to re-pick every event after
+      // re-enabling, which was the symptom behind "webhook gone on refresh".
+      const existing = await this.prisma.webhook.findUnique({
+        where: { instanceId: this.monitor.waInstances[instanceName].instanceId },
+        select: { events: true },
+      });
+      const existingEvents = Array.isArray(existing?.events) ? (existing.events as string[]) : [];
+      normalizedEvents = currentEvents.length > 0 ? currentEvents : existingEvents;
     } else {
-      if (0 === data.webhook.events.length) {
-        data.webhook.events = EventController.events;
-      }
+      normalizedEvents = currentEvents.length > 0 ? currentEvents : EventController.events;
     }
+
+    data.webhook = {
+      ...incoming,
+      enabled,
+      events: normalizedEvents,
+      url: incoming.url ?? '',
+      base64: incoming.base64 ?? false,
+      byEvents: incoming.byEvents ?? false,
+    };
 
     return this.prisma.webhook.upsert({
       where: {
         instanceId: this.monitor.waInstances[instanceName].instanceId,
       },
       update: {
-        enabled: data.webhook?.enabled,
-        events: data.webhook?.events,
-        url: data.webhook?.url,
-        headers: data.webhook?.headers,
+        enabled: data.webhook.enabled,
+        events: data.webhook.events,
+        url: data.webhook.url,
+        headers: data.webhook.headers,
         webhookBase64: data.webhook.base64,
         webhookByEvents: data.webhook.byEvents,
       },
       create: {
-        enabled: data.webhook?.enabled,
-        events: data.webhook?.events,
+        enabled: data.webhook.enabled,
+        events: data.webhook.events,
         instanceId: this.monitor.waInstances[instanceName].instanceId,
-        url: data.webhook?.url,
-        headers: data.webhook?.headers,
+        url: data.webhook.url,
+        headers: data.webhook.headers,
         webhookBase64: data.webhook.base64,
         webhookByEvents: data.webhook.byEvents,
       },
@@ -141,7 +162,12 @@ export class WebhookController extends EventController implements EventControlle
               timeout: webhookConfig.REQUEST?.TIMEOUT_MS ?? 30000,
             });
 
-            await this.retryWebhookRequest(httpService, webhookData, `${origin}.sendData-Webhook`, baseURL, serverUrl);
+            await this.retryWebhookRequest(httpService, webhookData, `${origin}.sendData-Webhook`, baseURL, serverUrl, {
+              instanceName,
+              event,
+              scope: 'instance',
+              requestHeaders: enhancedHeaders as Record<string, string>,
+            });
           }
         } catch (error) {
           this.logger.error({
@@ -191,6 +217,11 @@ export class WebhookController extends EventController implements EventControlle
               `${origin}.sendData-Webhook-Global`,
               globalURL,
               serverUrl,
+              {
+                instanceName,
+                event,
+                scope: 'global',
+              },
             );
           }
         } catch (error) {
@@ -217,6 +248,12 @@ export class WebhookController extends EventController implements EventControlle
     origin: string,
     baseURL: string,
     serverUrl: string,
+    historyCtx: {
+      instanceName: string;
+      event: string;
+      scope: 'instance' | 'global';
+      requestHeaders?: Record<string, string>;
+    },
     maxRetries?: number,
     delaySeconds?: number,
   ): Promise<void> {
@@ -229,10 +266,11 @@ export class WebhookController extends EventController implements EventControlle
     const nonRetryableStatusCodes = webhookConfig.RETRY?.NON_RETRYABLE_STATUS_CODES ?? [400, 401, 403, 404, 422];
 
     let attempts = 0;
+    const startedAt = Date.now();
 
     while (attempts < maxRetryAttempts) {
       try {
-        await httpService.post('', webhookData);
+        const response: AxiosResponse = await httpService.post('', webhookData);
         if (attempts > 0) {
           this.logger.log({
             local: `${origin}`,
@@ -240,6 +278,17 @@ export class WebhookController extends EventController implements EventControlle
             url: baseURL,
           });
         }
+        this.recordHistory({
+          ...historyCtx,
+          url: baseURL,
+          status: 'success',
+          httpStatus: response?.status,
+          attempts: attempts + 1,
+          startedAt,
+          finishedAt: Date.now(),
+          requestBody: webhookData,
+          responseBody: response?.data,
+        });
         return;
       } catch (error) {
         attempts++;
@@ -253,6 +302,19 @@ export class WebhookController extends EventController implements EventControlle
             statusCode: error?.response?.status,
             url: baseURL,
             server_url: serverUrl,
+          });
+          this.recordHistory({
+            ...historyCtx,
+            url: baseURL,
+            status: 'failure',
+            httpStatus: error?.response?.status,
+            attempts,
+            startedAt,
+            finishedAt: Date.now(),
+            errorMessage: error?.message,
+            errorCode: error?.code,
+            requestBody: webhookData,
+            responseBody: error?.response?.data,
           });
           throw error;
         }
@@ -273,6 +335,19 @@ export class WebhookController extends EventController implements EventControlle
         });
 
         if (attempts === maxRetryAttempts) {
+          this.recordHistory({
+            ...historyCtx,
+            url: baseURL,
+            status: 'failure',
+            httpStatus: error?.response?.status,
+            attempts,
+            startedAt,
+            finishedAt: Date.now(),
+            errorMessage: error?.message,
+            errorCode: error?.code,
+            requestBody: webhookData,
+            responseBody: error?.response?.data,
+          });
           throw error;
         }
 
@@ -293,6 +368,65 @@ export class WebhookController extends EventController implements EventControlle
         await new Promise((resolve) => setTimeout(resolve, nextDelay * 1000));
       }
     }
+  }
+
+  private recordHistory(payload: {
+    instanceName: string;
+    event: string;
+    scope: 'instance' | 'global';
+    url: string;
+    status: WebhookHistoryStatus;
+    httpStatus?: number;
+    attempts: number;
+    startedAt: number;
+    finishedAt: number;
+    errorMessage?: string;
+    errorCode?: string;
+    requestHeaders?: Record<string, string>;
+    requestBody?: unknown;
+    responseBody?: unknown;
+  }): void {
+    if (!webhookHistoryService.enabled) return;
+    try {
+      const entry: Omit<WebhookHistoryEntry, 'id'> = {
+        instanceName: payload.instanceName,
+        scope: payload.scope,
+        event: payload.event,
+        url: payload.url,
+        method: 'POST',
+        status: payload.status,
+        httpStatus: payload.httpStatus,
+        attempts: payload.attempts,
+        latencyMs: Math.max(0, payload.finishedAt - payload.startedAt),
+        errorMessage: payload.errorMessage,
+        errorCode: payload.errorCode,
+        requestHeaders: this.scrubHeaders(payload.requestHeaders),
+        requestBody: payload.requestBody,
+        responseBody: payload.responseBody as string | undefined,
+        startedAt: payload.startedAt,
+        finishedAt: payload.finishedAt,
+      };
+      webhookHistoryService.record(entry);
+    } catch (err) {
+      this.logger.error({
+        local: 'WebhookController.recordHistory',
+        message: `Failed to record webhook history: ${err?.message}`,
+      });
+    }
+  }
+
+  private scrubHeaders(headers?: Record<string, string>): Record<string, string> | undefined {
+    if (!headers) return undefined;
+    const scrubbed: Record<string, string> = {};
+    for (const [k, v] of Object.entries(headers)) {
+      const lower = k.toLowerCase();
+      if (lower === 'authorization' || lower === 'cookie' || lower === 'set-cookie' || lower === 'x-api-key') {
+        scrubbed[k] = '***';
+      } else {
+        scrubbed[k] = v;
+      }
+    }
+    return scrubbed;
   }
 
   private generateJwtToken(authToken: string): string {

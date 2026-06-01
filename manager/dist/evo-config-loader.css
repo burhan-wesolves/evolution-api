@@ -1,0 +1,79 @@
+/* Loader overlay shown over an instance-settings card while its /find call
+   is in flight. Sits inside the card itself (host gets position: relative
+   set inline), so it visually replaces the empty-default form. */
+
+/* Dim the form area. We deliberately avoid backdrop-filter on this element
+   because it would create a containing block for `position: fixed`
+   descendants — making the inner card position relative to this overlay
+   instead of the viewport. */
+.evo-cfg-loader {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--background, #0b0f17) 82%, transparent);
+  z-index: 50;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+  border-radius: inherit;
+}
+/* Anchor the inner card to the viewport so users always see it, even when
+   the settings card it overlays is far taller than the viewport. */
+.evo-cfg-loader > .evo-cfg-loader-card {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+.evo-cfg-loader[data-evo-visible='true'] {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.evo-cfg-loader-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 1.25rem 1.5rem;
+  border: 1px solid rgba(127, 127, 127, 0.2);
+  border-radius: 0.5rem;
+  background: var(--background, #0b0f17);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  color: var(--foreground, #e5e7eb);
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  min-width: 240px;
+  max-width: 90%;
+  text-align: center;
+}
+
+.evo-cfg-loader-spinner {
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 9999px;
+  border: 2px solid rgba(127, 127, 127, 0.25);
+  border-top-color: rgb(99, 102, 241);
+  animation: evo-cfg-spin 0.7s linear infinite;
+}
+
+.evo-cfg-loader-text {
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+.evo-cfg-loader-sub {
+  font-size: 0.75rem;
+  opacity: 0.7;
+}
+
+@keyframes evo-cfg-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .evo-cfg-loader,
+  .evo-cfg-loader-spinner {
+    transition: none;
+    animation: none;
+  }
+}
