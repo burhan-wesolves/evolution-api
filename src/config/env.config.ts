@@ -321,6 +321,16 @@ export type Webhook = {
     CAPTURE_RESPONSE_BODY?: boolean;
     RESPONSE_BODY_MAX_BYTES?: number;
   };
+  SIGNING?: {
+    SECRET?: string;
+    HEADER?: string;
+    TIMESTAMP_HEADER?: string;
+    INCLUDE_TIMESTAMP?: boolean;
+  };
+  BEARER_JWT?: {
+    KEY?: string;
+    EXPIRES_SECONDS?: number;
+  };
 };
 export type Pusher = { ENABLED: boolean; GLOBAL?: GlobalPusher; EVENTS: EventsPusher };
 export type ConfigSessionPhone = { CLIENT: string; NAME: string };
@@ -819,6 +829,16 @@ export class ConfigService {
           MAX_ENTRIES_PER_INSTANCE: Number.parseInt(process.env?.WEBHOOK_HISTORY_MAX_ENTRIES_PER_INSTANCE) || 500,
           CAPTURE_RESPONSE_BODY: process.env?.WEBHOOK_HISTORY_CAPTURE_RESPONSE_BODY !== 'false',
           RESPONSE_BODY_MAX_BYTES: Number.parseInt(process.env?.WEBHOOK_HISTORY_RESPONSE_BODY_MAX_BYTES) || 4096,
+        },
+        SIGNING: {
+          SECRET: process.env?.WEBHOOK_SIGNING_SECRET || '',
+          HEADER: process.env?.WEBHOOK_SIGNING_HEADER || 'X-Evolution-Signature',
+          TIMESTAMP_HEADER: process.env?.WEBHOOK_SIGNING_TIMESTAMP_HEADER || 'X-Evolution-Timestamp',
+          INCLUDE_TIMESTAMP: process.env?.WEBHOOK_SIGNING_INCLUDE_TIMESTAMP !== 'false',
+        },
+        BEARER_JWT: {
+          KEY: process.env?.WEBHOOK_BEARER_JWT_KEY || '',
+          EXPIRES_SECONDS: Number.parseInt(process.env?.WEBHOOK_BEARER_JWT_EXPIRES_SECONDS) || 600,
         },
       },
       CONFIG_SESSION_PHONE: {

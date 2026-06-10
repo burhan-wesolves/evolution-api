@@ -6,6 +6,7 @@ import { configService, Log, Webhook } from '@config/env.config';
 import { Logger } from '@config/logger.config';
 // import { BadRequestException } from '@exceptions';
 import axios, { AxiosInstance, AxiosResponse } from 'axios';
+import { createHmac } from 'crypto';
 import * as jwt from 'jsonwebtoken';
 
 import { EmitData, EventController, EventControllerInterface } from '../event.controller';
@@ -104,6 +105,17 @@ export class WebhookController extends EventController implements EventControlle
       webhookHeaders['Authorization'] = `Bearer ${jwtToken}`;
 
       delete webhookHeaders['jwt_key'];
+    } else if (!webhookHeaders['Authorization']) {
+      // Global fallback: if no per-instance jwt_key was configured but the
+      // deployment specified a global webhook bearer (e.g. the Supabase
+      // JWT_SECRET shared with the edge runtime), mint a short-lived JWT
+      // and attach it as the Authorization header. This lets every outbound
+      // webhook pass an authenticated identity to receivers that gate on
+      // JWT (Supabase Edge Functions) without per-instance config drift.
+      const globalKey = configService.get<Webhook>('WEBHOOK').BEARER_JWT?.KEY?.trim();
+      if (globalKey) {
+        webhookHeaders['Authorization'] = `Bearer ${this.generateJwtToken(globalKey)}`;
+      }
     }
 
     const we = event.replace(/[.-]/gm, '_').toUpperCase();
@@ -155,6 +167,7 @@ export class WebhookController extends EventController implements EventControlle
               'X-Timestamp': Date.now().toString(),
               'User-Agent': 'EvolutionAPI-Webhook/2.3.7',
             };
+            this.applySignatureHeaders(enhancedHeaders, webhookData, webhookConfig);
 
             const httpService = axios.create({
               baseURL,
@@ -206,8 +219,15 @@ export class WebhookController extends EventController implements EventControlle
 
         try {
           if (regex.test(globalURL)) {
+            const globalHeaders: Record<string, string> = {
+              'Content-Type': 'application/json',
+              'User-Agent': 'EvolutionAPI-Webhook/2.3.7',
+            };
+            this.applySignatureHeaders(globalHeaders, webhookData, webhookConfig);
+
             const httpService = axios.create({
               baseURL: globalURL,
+              headers: globalHeaders,
               timeout: webhookConfig.REQUEST?.TIMEOUT_MS ?? 30000,
             });
 
@@ -221,6 +241,7 @@ export class WebhookController extends EventController implements EventControlle
                 instanceName,
                 event,
                 scope: 'global',
+                requestHeaders: globalHeaders,
               },
             );
           }
@@ -429,11 +450,33 @@ export class WebhookController extends EventController implements EventControlle
     return scrubbed;
   }
 
+  private applySignatureHeaders(headers: Record<string, string>, payload: unknown, webhookConfig: Webhook): void {
+    const signing = webhookConfig.SIGNING;
+    const secret = signing?.SECRET?.trim();
+    if (!secret) return;
+
+    const timestampSeconds = Math.floor(Date.now() / 1000).toString();
+    const bodyString = JSON.stringify(payload ?? {});
+    const signingPayload = signing?.INCLUDE_TIMESTAMP === false ? bodyString : `${timestampSeconds}.${bodyString}`;
+    const digest = createHmac('sha256', secret).update(signingPayload).digest('hex');
+    const signatureHeader = signing?.HEADER || 'X-Evolution-Signature';
+
+    if (signing?.INCLUDE_TIMESTAMP === false) {
+      headers[signatureHeader] = `v1=${digest}`;
+    } else {
+      headers[signatureHeader] = `t=${timestampSeconds},v1=${digest}`;
+      const timestampHeader = signing?.TIMESTAMP_HEADER || 'X-Evolution-Timestamp';
+      headers[timestampHeader] = timestampSeconds;
+    }
+  }
+
   private generateJwtToken(authToken: string): string {
     try {
+      const expiresIn = configService.get<Webhook>('WEBHOOK').BEARER_JWT?.EXPIRES_SECONDS ?? 600;
+      const now = Math.floor(Date.now() / 1000);
       const payload = {
-        iat: Math.floor(Date.now() / 1000),
-        exp: Math.floor(Date.now() / 1000) + 600, // 10 min expiration
+        iat: now,
+        exp: now + Math.max(expiresIn, 60),
         app: 'evolution',
         action: 'webhook',
       };
