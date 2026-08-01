@@ -17,21 +17,6 @@ type DataValidate<T> = {
 
 const logger = new Logger('Validate');
 
-const PROTECTED_INSTANCE_FIELDS = ['instanceName', 'instanceId'] as const;
-
-function sanitizeUntrustedInput(source: Record<string, any> | undefined): Record<string, any> {
-  if (!source || typeof source !== 'object') return {};
-  const sanitized: Record<string, any> = {};
-  for (const [key, value] of Object.entries(source)) {
-    if ((PROTECTED_INSTANCE_FIELDS as readonly string[]).includes(key)) {
-      logger.warn(`Ignoring attempt to override protected field "${key}" via untrusted input`);
-      continue;
-    }
-    sanitized[key] = value;
-  }
-  return sanitized;
-}
-
 export abstract class RouterBroker {
   constructor() {}
   public routerPath(path: string, param = true) {
@@ -50,38 +35,42 @@ export abstract class RouterBroker {
 
     const isInstanceCreate = request.originalUrl.includes('/instance/create');
 
-    // On instance-scoped routes the URL param (:instanceName) is the
-    // authenticated identity, so query/body must not override it (CVE-2435,
-    // #2549). On param-less routes (e.g. GET /instance/fetchInstances) there
-    // is no URL-derived identity — there the instanceId/instanceName query
-    // params ARE the legitimate filter and must be preserved, otherwise the
-    // controller falls through to returning ALL instances.
-    const hasUrlInstance = Boolean(request.params?.instanceName);
+    // The instance identity is authenticated by the guard via the URL
+    // :instanceName param. Capture it BEFORE hydrating from query/body so
+    // nothing downstream can clobber it (`instance` aliases request.params).
+    const urlInstanceName = request.params?.instanceName;
 
+    // Hydrate the DTO from the query string. On param-less listing routes
+    // (e.g. GET /instance/fetchInstances?instanceId=…&number=…) this is where
+    // the legitimate filters live, so they flow straight through.
     if (request?.query && Object.keys(request.query).length > 0) {
-      const query = request.query as Record<string, any>;
-      Object.assign(instance, hasUrlInstance ? sanitizeUntrustedInput(query) : query);
+      Object.assign(instance, request.query as Record<string, any>);
     }
 
     if (isInstanceCreate) {
-      // /instance/create is gated by the global API key, not by per-instance
-      // auth, so there is no authenticated instanceName to protect from
-      // body override here — the body IS the legitimate source for it.
-      // Sanitizing in this branch (the original #2549 fix) made `name`
-      // arrive at Prisma as undefined.
+      // /instance/create is gated by the global API key, so the body is the
+      // legitimate source for the new instance's name/id.
       Object.assign(instance, body);
     }
 
     Object.assign(ref, body);
 
-    // The schema-validated `ref` must carry the URL-derived instanceName so
-    // GET routes (whose body is empty) can still satisfy
-    // `required: ['instanceName']` in instanceSchema. Done AFTER body merge
-    // so the URL param is authoritative and an attacker can't slip a
-    // mismatched instanceName via body — the auth guard already validated
-    // the param-derived name.
-    if (request.params?.instanceName) {
-      (ref as any).instanceName = request.params.instanceName;
+    // When the route carries a URL :instanceName, that guard-validated value is
+    // the single source of truth. Force it back onto both the DTO and the
+    // schema ref and drop any instanceId slipped in via query/body, so a caller
+    // can never redirect the request to a different instance (cross-instance
+    // auth bypass — CVE-2435, #2549). Param-less routes have no URL identity
+    // and keep their instanceId/instanceName query filters intact.
+    if (urlInstanceName) {
+      const attempted = (instance as unknown as Record<string, unknown>).instanceName;
+      if (attempted && attempted !== urlInstanceName) {
+        logger.warn(
+          `Ignoring query/body instanceName "${attempted}" — URL param "${urlInstanceName}" is authoritative`,
+        );
+      }
+      instance.instanceName = urlInstanceName;
+      delete (instance as unknown as Record<string, unknown>).instanceId;
+      (ref as any).instanceName = urlInstanceName;
     }
 
     const v = schema ? validate(ref, schema) : { valid: true, errors: [] };
