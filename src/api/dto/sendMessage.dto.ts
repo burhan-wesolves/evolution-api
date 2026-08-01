@@ -101,9 +101,13 @@ export class SendAudioDto extends Metadata {
   audio: string;
 }
 
-export type TypeButton = 'reply' | 'copy' | 'url' | 'call' | 'pix';
+export type TypeButton = 'reply' | 'copy' | 'url' | 'call' | 'pix' | 'flow';
 
 export type KeyType = 'phone' | 'email' | 'cpf' | 'cnpj' | 'random';
+
+export type FlowAction = 'navigate' | 'data_exchange';
+
+export type FlowMode = 'published' | 'draft';
 
 export class Button {
   type: TypeButton;
@@ -116,6 +120,14 @@ export class Button {
   name?: string;
   keyType?: KeyType;
   key?: string;
+  // WhatsApp Flows (galaxy_message) fields
+  flowId?: string;
+  flowToken?: string;
+  flowCta?: string;
+  flowAction?: FlowAction;
+  flowActionPayload?: Record<string, any>;
+  flowMessageVersion?: string;
+  flowMode?: FlowMode;
 }
 
 export class SendButtonsDto extends Metadata {

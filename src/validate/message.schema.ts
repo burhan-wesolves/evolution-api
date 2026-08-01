@@ -422,7 +422,7 @@ export const buttonsMessageSchema: JSONSchema7 = {
         properties: {
           type: {
             type: 'string',
-            enum: ['reply', 'copy', 'url', 'call', 'pix'],
+            enum: ['reply', 'copy', 'url', 'call', 'pix', 'flow'],
           },
           displayText: { type: 'string' },
           id: { type: 'string' },
@@ -432,6 +432,13 @@ export const buttonsMessageSchema: JSONSchema7 = {
           name: { type: 'string' },
           keyType: { type: 'string', enum: ['phone', 'email', 'cpf', 'cnpj', 'random'] },
           key: { type: 'string' },
+          flowId: { type: 'string' },
+          flowToken: { type: 'string' },
+          flowCta: { type: 'string' },
+          flowAction: { type: 'string', enum: ['navigate', 'data_exchange'] },
+          flowActionPayload: { type: 'object' },
+          flowMessageVersion: { type: 'string' },
+          flowMode: { type: 'string', enum: ['published', 'draft'] },
         },
         required: ['type'],
         ...isNotEmpty('id', 'url', 'phoneNumber'),

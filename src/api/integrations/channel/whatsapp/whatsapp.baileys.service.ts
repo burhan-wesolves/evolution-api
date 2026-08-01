@@ -3788,6 +3788,16 @@ export class BaileysStartupService extends ChannelStartupService {
           ],
           share_payment_status: false,
         }),
+      flow: () =>
+        toString({
+          flow_message_version: button.flowMessageVersion ?? '3',
+          flow_token: button.flowToken ?? this.generateRandomId(),
+          flow_id: button.flowId,
+          flow_cta: button.flowCta ?? button.displayText,
+          flow_action: button.flowAction ?? 'navigate',
+          ...(button.flowActionPayload ? { flow_action_payload: button.flowActionPayload } : {}),
+          mode: button.flowMode ?? 'published',
+        }),
     };
 
     return json[button.type]?.() || '';
@@ -3799,6 +3809,7 @@ export class BaileysStartupService extends ChannelStartupService {
     ['url', 'cta_url'],
     ['call', 'cta_call'],
     ['pix', 'payment_info'],
+    ['flow', 'galaxy_message'],
   ]);
 
   private readonly mapKeyType = new Map<KeyType, string>([
@@ -3820,6 +3831,7 @@ export class BaileysStartupService extends ChannelStartupService {
     ).length;
     const hasReplyButtons = replyCount > 0;
     const hasPixButton = data.buttons.some((btn) => btn.type === 'pix');
+    const hasFlowButton = data.buttons.some((btn) => btn.type === 'flow');
     const hasCTAButtons = ctaCount > 0;
 
     /* =========================
@@ -3827,8 +3839,66 @@ export class BaileysStartupService extends ChannelStartupService {
      *
      * WhatsApp's native_flow with name="mixed" (see buildInteractiveBizNode)
      * renders quick_reply + cta_url + cta_call + cta_copy together. PIX
-     * (`payment_info`) uses a different template and must travel alone.
+     * (`payment_info`) and Flows (`galaxy_message`) use their own templates
+     * and must travel alone.
      * ========================= */
+
+    // WhatsApp Flows (galaxy_message) — renders its own interactive form and
+    // must be the only button in the message.
+    if (hasFlowButton) {
+      if (data.buttons.length > 1) {
+        throw new BadRequestException('Only one flow button is allowed');
+      }
+      if (hasReplyButtons || hasCTAButtons || hasPixButton) {
+        throw new BadRequestException('Flow button cannot be mixed with other button types');
+      }
+
+      const flowButton = data.buttons[0];
+      if (!flowButton.flowId) {
+        throw new BadRequestException('flowId is required for a flow button');
+      }
+
+      const message: proto.IMessage = {
+        interactiveMessage: {
+          body: {
+            text: (() => {
+              let text = `*${data.title}*`;
+              if (data?.description) {
+                text += `\n\n${data.description}`;
+              }
+              return text;
+            })(),
+          },
+          footer: data?.footer ? { text: data.footer } : undefined,
+          nativeFlowMessage: {
+            buttons: [
+              {
+                name: this.mapType.get('flow'),
+                buttonParamsJson: this.toJSONString(flowButton),
+              },
+            ],
+            messageParamsJson: JSON.stringify({
+              from: 'api',
+              templateId: v4(),
+            }),
+          },
+        },
+      };
+
+      return await this.sendMessageWithTyping(
+        data.number,
+        message,
+        {
+          delay: data?.delay,
+          presence: 'composing',
+          quoted: data?.quoted,
+          mentionsEveryOne: data?.mentionsEveryOne,
+          mentioned: data?.mentioned,
+        },
+        false,
+        [buildInteractiveBizNode()],
+      );
+    }
 
     // Per-type ceilings on a mixed message — keep within WhatsApp's
     // rendered limits (quick_reply ≤ 3, CTA ≤ 2) and cap the total so the

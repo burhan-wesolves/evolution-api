@@ -50,8 +50,17 @@ export abstract class RouterBroker {
 
     const isInstanceCreate = request.originalUrl.includes('/instance/create');
 
+    // On instance-scoped routes the URL param (:instanceName) is the
+    // authenticated identity, so query/body must not override it (CVE-2435,
+    // #2549). On param-less routes (e.g. GET /instance/fetchInstances) there
+    // is no URL-derived identity — there the instanceId/instanceName query
+    // params ARE the legitimate filter and must be preserved, otherwise the
+    // controller falls through to returning ALL instances.
+    const hasUrlInstance = Boolean(request.params?.instanceName);
+
     if (request?.query && Object.keys(request.query).length > 0) {
-      Object.assign(instance, sanitizeUntrustedInput(request.query as Record<string, any>));
+      const query = request.query as Record<string, any>;
+      Object.assign(instance, hasUrlInstance ? sanitizeUntrustedInput(query) : query);
     }
 
     if (isInstanceCreate) {
