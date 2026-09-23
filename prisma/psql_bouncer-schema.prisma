@@ -761,3 +761,49 @@ model EvoaiSetting {
   Instance        Instance  @relation(fields: [instanceId], references: [id], onDelete: Cascade)
   instanceId      String    @unique
 }
+
+/// Watchman delivery status. The database, not the code, owns this vocabulary.
+enum MessageDeliveryStatus {
+  pending
+  delivered
+  failed
+}
+
+/// Watchman ledger: one row per inbound 1:1 message on a watched instance,
+/// recording whether our downstream webhook accepted it.
+///
+/// KEYED BY INSTANCE NAME, NOT INSTANCE ID, AND DELIBERATELY NOT A FOREIGN KEY.
+/// Deleting and recreating an instance is how you reconnect after a logout, and
+/// it mints a NEW Instance row -- a cascade from it would wipe the ledger at the
+/// exact moment it matters, losing every message that was still pending. Keyed
+/// by the stable name, tags survive that, so messages already marked delivered
+/// stay marked and a post-re-pair history sync is skipped by the tag instead of
+/// being re-examined. instanceId is kept for debugging only.
+model MessageDelivery {
+  id               String                @id @default(cuid())
+  instanceName     String                @db.VarChar(255)
+  instanceId       String?               @db.VarChar(255)
+  keyId            String                @db.VarChar(100)
+  remoteJid        String                @db.VarChar(100)
+  messageTimestamp Int                   @db.Integer
+  payload          Json?                 @db.JsonB
+  status           MessageDeliveryStatus @default(pending)
+  attempts         Int                   @default(0) @db.Integer
+  lastError        String?               @db.VarChar(500)
+  deliveredAt      DateTime?             @db.Timestamp
+  createdAt        DateTime              @default(now()) @db.Timestamp
+  updatedAt        DateTime              @updatedAt @db.Timestamp
+
+  @@unique([instanceName, keyId])
+  @@index([instanceName, status, messageTimestamp])
+}
+
+/// Watchman per-instance state. `watchingSince` is the replay floor: set once
+/// and never moved, so history older than it is never tracked. Keyed by name for
+/// the same reason as above -- a recreated instance must keep its floor.
+model WatchmanInstance {
+  instanceName  String   @id @db.VarChar(255)
+  watchingSince DateTime @default(now()) @db.Timestamp
+  createdAt     DateTime @default(now()) @db.Timestamp
+  updatedAt     DateTime @updatedAt @db.Timestamp
+}
