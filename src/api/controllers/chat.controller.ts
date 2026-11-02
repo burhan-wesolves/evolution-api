@@ -1,8 +1,10 @@
 import {
   ArchiveChatDto,
   BlockUserDto,
+  ClearChatForMeDto,
   DecryptPollVoteDto,
   DeleteMessage,
+  DeleteMessageForMeDto,
   getBase64FromMediaMessageDto,
   MarkChatUnreadDto,
   MarkMessageAsPlayedDto,
@@ -46,6 +48,14 @@ export class ChatController {
 
   public async deleteMessage({ instanceName }: InstanceDto, data: DeleteMessage) {
     return await this.waMonitor.waInstances[instanceName].deleteMessage(data);
+  }
+
+  public async deleteMessageForMe({ instanceName }: InstanceDto, data: DeleteMessageForMeDto) {
+    return await this.waMonitor.waInstances[instanceName].deleteMessageForMe(data);
+  }
+
+  public async clearChatForMe({ instanceName }: InstanceDto, data: ClearChatForMeDto) {
+    return await this.waMonitor.waInstances[instanceName].clearChatForMe(data);
   }
 
   public async fetchProfilePicture({ instanceName }: InstanceDto, data: NumberDto) {

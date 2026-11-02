@@ -772,6 +772,12 @@ export class EvolutionStartupService extends ChannelStartupService {
   public async deleteMessage() {
     throw new BadRequestException('Method not available on Evolution Channel');
   }
+  public async deleteMessageForMe() {
+    throw new BadRequestException('Method not available on Evolution Channel');
+  }
+  public async clearChatForMe() {
+    throw new BadRequestException('Method not available on Evolution Channel');
+  }
   public async mediaSticker() {
     throw new BadRequestException('Method not available on Evolution Channel');
   }
