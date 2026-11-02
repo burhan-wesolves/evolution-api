@@ -1781,7 +1781,6 @@ export class BaileysStartupService extends ChannelStartupService {
 
               messageRaw.key.addressingMode = 'pn';
             }
-            console.log(messageRaw);
 
             await watchmanService.recordInbound(this.instance.name, this.instanceId, [
               {
@@ -4577,6 +4576,22 @@ export class BaileysStartupService extends ChannelStartupService {
       messageTimestamp: { lte: before },
       key: { path: ['remoteJid'], equals: remoteJid },
     };
+    // Watchman rows parked as `failed` keep their payload so an endpoint repair can revive them
+    // (that is why failure itself must not null it). A cleared chat is being forgotten, so drop the
+    // message bodies here. Pending rows are left alone: they are still owed a delivery.
+    try {
+      await this.prismaRepository.messageDelivery.updateMany({
+        where: {
+          instanceName: this.instance.name,
+          remoteJid,
+          messageTimestamp: { lte: before },
+          status: 'failed',
+        },
+        data: { payload: null },
+      });
+    } catch (error) {
+      this.logger.warn(`Could not prune parked watchman payloads: ${error?.toString()}`);
+    }
     const last = await this.prismaRepository.message.findFirst({ where, orderBy: { messageTimestamp: 'desc' } });
     if (!last) return { cleared: false, deleted: 0 };
 
