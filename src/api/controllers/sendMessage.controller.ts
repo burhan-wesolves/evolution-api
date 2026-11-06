@@ -2,7 +2,6 @@ import { InstanceDto } from '@api/dto/instance.dto';
 import {
   SendAudioDto,
   SendButtonsDto,
-  SendCarouselDto,
   SendContactDto,
   SendListDto,
   SendLocationDto,
@@ -70,7 +69,7 @@ export class SendMessageController {
       // Si file existe y tiene buffer, o si es una URL o Base64, continúa
       return await this.waMonitor.waInstances[instanceName].audioWhatsapp(data, file);
     } else {
-      console.error('File has no buffer, or audio is not a valid URL/Base64');
+      console.error('El archivo no tiene buffer o el audio no es una URL o Base64 válida');
       throw new BadRequestException('Owned media must be a url, base64, or valid file with buffer');
     }
   }
@@ -85,10 +84,6 @@ export class SendMessageController {
 
   public async sendList({ instanceName }: InstanceDto, data: SendListDto) {
     return await this.waMonitor.waInstances[instanceName].listMessage(data);
-  }
-
-  public async sendCarousel({ instanceName }: InstanceDto, data: SendCarouselDto) {
-    return await this.waMonitor.waInstances[instanceName].carouselMessage(data);
   }
 
   public async sendContact({ instanceName }: InstanceDto, data: SendContactDto) {

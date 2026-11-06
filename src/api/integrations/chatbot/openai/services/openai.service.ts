@@ -3,6 +3,7 @@ import { WAMonitoringService } from '@api/services/monitor.service';
 import { Integration } from '@api/types/wa.types';
 import { ConfigService, Language, Openai as OpenaiConfig } from '@config/env.config';
 import { IntegrationSession, OpenaiBot, OpenaiSetting } from '@prisma/client';
+import { sendTelemetry } from '@utils/sendTelemetry';
 import axios from 'axios';
 import { downloadMediaMessage } from 'baileys';
 import { isURL } from 'class-validator';
@@ -125,6 +126,7 @@ export class OpenaiService extends BaseChatbotService<OpenaiBot, OpenaiSetting> 
           });
         }
 
+        await sendTelemetry('/openai/session/finish');
         return;
       }
 
@@ -153,6 +155,7 @@ export class OpenaiService extends BaseChatbotService<OpenaiBot, OpenaiSetting> 
           msg,
         );
 
+        await sendTelemetry('/openai/session/start');
         return;
       }
 
@@ -333,6 +336,7 @@ export class OpenaiService extends BaseChatbotService<OpenaiBot, OpenaiSetting> 
     await this.client.beta.threads.messages.create(threadId, messageData);
 
     if (fromMe) {
+      sendTelemetry('/message/sendText');
       return '';
     }
 
@@ -707,7 +711,9 @@ export class OpenaiService extends BaseChatbotService<OpenaiBot, OpenaiSetting> 
       );
     }
 
-    const lang = this.configService.get<Language>('LANGUAGE');
+    const lang = this.configService.get<Language>('LANGUAGE').includes('pt')
+      ? 'pt'
+      : this.configService.get<Language>('LANGUAGE');
 
     const formData = new FormData();
     formData.append('file', audio, 'audio.ogg');

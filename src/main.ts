@@ -1,11 +1,24 @@
+// Import this first from sentry instrument!
+import '@utils/instrumentSentry';
+
+// Now import other modules
 import { ProviderFiles } from '@api/provider/sessions';
 import { PrismaRepository } from '@api/repository/repository.service';
 import { HttpStatus, router } from '@api/routes/index.router';
-import { eventManager, waMonitor, watchmanService } from '@api/server.module';
-import { Auth, configService, Cors, HttpServer, ProviderSession, Webhook } from '@config/env.config';
+import { eventManager, waMonitor } from '@api/server.module';
+import {
+  Auth,
+  configService,
+  Cors,
+  HttpServer,
+  ProviderSession,
+  Sentry as SentryConfig,
+  Webhook,
+} from '@config/env.config';
 import { onUnexpectedError } from '@config/error.config';
 import { Logger } from '@config/logger.config';
 import { ROOT_DIR } from '@config/path.config';
+import * as Sentry from '@sentry/node';
 import { ServerUP } from '@utils/server-up';
 import axios from 'axios';
 import compression from 'compression';
@@ -56,12 +69,6 @@ async function bootstrap() {
   app.use(express.static(join(ROOT_DIR, 'public')));
 
   app.use('/store', express.static(join(ROOT_DIR, 'store')));
-
-  // Licensing was removed — the Manager UI still calls /license/status on
-  // boot. Return a stub so it logs "active" instead of a 404.
-  app.get('/license/status', (_req: Request, res: Response) => {
-    res.status(200).json({ status: 'active', instance_id: 'core' });
-  });
 
   app.use('/', router);
 
@@ -140,7 +147,15 @@ async function bootstrap() {
   }
 
   eventManager.init(server);
-  watchmanService.init();
+
+  const sentryConfig = configService.get<SentryConfig>('SENTRY');
+  if (sentryConfig.DSN) {
+    logger.info('Sentry - ON');
+
+    // Add this after all routes,
+    // but before any and other error-handling middlewares are defined
+    Sentry.setupExpressErrorHandler(app);
+  }
 
   server.listen(httpServer.PORT, () => logger.log(httpServer.TYPE.toUpperCase() + ' - ON: ' + httpServer.PORT));
 

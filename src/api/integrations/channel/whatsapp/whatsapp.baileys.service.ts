@@ -3,13 +3,10 @@ import { OfferCallDto } from '@api/dto/call.dto';
 import {
   ArchiveChatDto,
   BlockUserDto,
-  ClearChatForMeDto,
   DeleteMessage,
-  DeleteMessageForMeDto,
   getBase64FromMediaMessageDto,
   LastMessage,
   MarkChatUnreadDto,
-  MarkMessageAsPlayedDto,
   NumberBusiness,
   OnWhatsAppDto,
   PrivacySettingDto,
@@ -29,7 +26,6 @@ import {
   GroupSendInvite,
   GroupSubjectDto,
   GroupToggleEphemeralDto,
-  GroupUpdateMemberAddModeDto,
   GroupUpdateParticipantDto,
   GroupUpdateSettingDto,
 } from '@api/dto/group.dto';
@@ -37,14 +33,12 @@ import { InstanceDto, SetPresenceDto } from '@api/dto/instance.dto';
 import { HandleLabelDto, LabelDto } from '@api/dto/label.dto';
 import {
   Button,
-  CarouselCard,
   ContactMessage,
   KeyType,
   MediaMessage,
   Options,
   SendAudioDto,
   SendButtonsDto,
-  SendCarouselDto,
   SendContactDto,
   SendListDto,
   SendLocationDto,
@@ -62,7 +56,7 @@ import { chatwootImport } from '@api/integrations/chatbot/chatwoot/utils/chatwoo
 import * as s3Service from '@api/integrations/storage/s3/libs/minio.server';
 import { ProviderFiles } from '@api/provider/sessions';
 import { PrismaRepository, Query } from '@api/repository/repository.service';
-import { chatbotController, waMonitor, watchmanService } from '@api/server.module';
+import { chatbotController, waMonitor } from '@api/server.module';
 import { CacheService } from '@api/services/cache.service';
 import { ChannelStartupService } from '@api/services/channel.service';
 import { Events, MessageSubtype, TypeMediaMessage, wa } from '@api/types/wa.types';
@@ -73,6 +67,7 @@ import {
   Chatwoot,
   ConfigService,
   configService,
+  ConfigSessionPhone,
   Database,
   Log,
   Openai,
@@ -89,16 +84,14 @@ import { createJid } from '@utils/createJid';
 import { fetchLatestWaWebVersion } from '@utils/fetchLatestWaWebVersion';
 import { makeProxyAgent, makeProxyAgentUndici } from '@utils/makeProxyAgent';
 import { getOnWhatsappCache, saveOnWhatsappCache } from '@utils/onWhatsappCache';
-import { reconnectDelayMs } from '@utils/reconnectBackoff';
 import { status } from '@utils/renderStatus';
+import { sendTelemetry } from '@utils/sendTelemetry';
 import useMultiFileAuthStatePrisma from '@utils/use-multi-file-auth-state-prisma';
 import { AuthStateProvider } from '@utils/use-multi-file-auth-state-provider-files';
 import { useMultiFileAuthStateRedisDb } from '@utils/use-multi-file-auth-state-redis-db';
-import audioDecode from 'audio-decode';
 import axios from 'axios';
 import makeWASocket, {
   AnyMessageContent,
-  BinaryNode,
   BufferedEventData,
   BufferJSON,
   CacheStore,
@@ -111,7 +104,6 @@ import makeWASocket, {
   DisconnectReason,
   downloadContentFromMessage,
   downloadMediaMessage,
-  generateMessageIDV2,
   generateWAMessageFromContent,
   getAggregateVotesInPollMessage,
   GetCatalogOptions,
@@ -132,6 +124,7 @@ import makeWASocket, {
   Product,
   proto,
   UserFacingSocketConfig,
+  WABrowserDescription,
   WAMediaUpload,
   WAMessage,
   WAMessageKey,
@@ -146,11 +139,11 @@ import { createHash } from 'crypto';
 import EventEmitter2 from 'eventemitter2';
 import ffmpeg from 'fluent-ffmpeg';
 import FormData from 'form-data';
-import { getLinkPreview } from 'link-preview-js';
 import Long from 'long';
 import mimeTypes from 'mime-types';
 import NodeCache from 'node-cache';
 import cron from 'node-cron';
+import { release } from 'os';
 import { join } from 'path';
 import P from 'pino';
 import qrcode, { QRCodeToDataURLOptions } from 'qrcode';
@@ -160,7 +153,6 @@ import { PassThrough, Readable } from 'stream';
 import { v4 } from 'uuid';
 
 import { BaileysMessageProcessor } from './baileysMessage.processor';
-import { buildInteractiveBizNode, buildListBizNode, toNativeFlowButton } from './helpers/interactiveMessage.helper';
 import { useVoiceCallsBaileys } from './voiceCalls/useVoiceCallsBaileys';
 
 export interface ExtendedIMessageKey extends proto.IMessageKey {
@@ -169,9 +161,6 @@ export interface ExtendedIMessageKey extends proto.IMessageKey {
   server_id?: string;
   isViewOnce?: boolean;
 }
-
-// Long enough for a recipient's retry receipt to find the message; see deleteMessageForMe.
-const STORED_MESSAGE_PURGE_DELAY_MS = 5 * 60 * 1000;
 
 const groupMetadataCache = new CacheService(new CacheEngine(configService, 'groups').getEngine());
 
@@ -223,7 +212,7 @@ async function getVideoDuration(input: Buffer | string | Readable): Promise<numb
       return data.slice(offset, offset + size);
     };
   } else {
-    throw new Error('Unsupported input type');
+    throw new Error('Tipo de entrada não suportado');
   }
 
   const result = await mediainfo.analyzeData(() => fileSize, readChunk);
@@ -233,12 +222,6 @@ async function getVideoDuration(input: Buffer | string | Readable): Promise<numb
   const duration = generalTrack.Duration;
 
   return Math.round(parseFloat(duration));
-}
-
-function normalizeListType(listMessage?: proto.Message.IListMessage | null): void {
-  if (listMessage?.listType === proto.Message.ListMessage.ListType.PRODUCT_LIST) {
-    listMessage.listType = proto.Message.ListMessage.ListType.SINGLE_SELECT;
-  }
 }
 
 export class BaileysStartupService extends ChannelStartupService {
@@ -266,30 +249,12 @@ export class BaileysStartupService extends ChannelStartupService {
   private readonly msgRetryCounterCache: CacheStore = new NodeCache();
   private readonly userDevicesCache: CacheStore = new NodeCache({ stdTTL: 300000, useClones: false });
   private endSession = false;
-  private isDeleting = false; // Flag to prevent reconnection during deletion
-  private reconnectTimeout?: NodeJS.Timeout;
-  // Consecutive failed reconnects; drives reconnectDelayMs. Reset on 'open'.
-  private reconnectAttempts = 0;
   private logBaileys = this.configService.get<Log>('LOG').BAILEYS;
   private eventProcessingQueue: Promise<void> = Promise.resolve();
-  private _lastStream515At = 0;
-
-  // Cumulative history sync counters (reset on new sync or completion)
-  private historySyncMessageCount = 0;
-  private historySyncChatCount = 0;
-  private historySyncContactCount = 0;
-  private historySyncLastProgress = -1;
 
   // Cache TTL constants (in seconds)
   private readonly MESSAGE_CACHE_TTL_SECONDS = 5 * 60; // 5 minutes - avoid duplicate message processing
   private readonly UPDATE_CACHE_TTL_SECONDS = 30 * 60; // 30 minutes - avoid duplicate status updates
-
-  // Reconnect behaviour for the Baileys "stream:error 515" sequence.
-  // After WhatsApp emits 515 it usually closes with `loggedOut`; that close is *not* a real logout
-  // and we should reconnect. We treat any close arriving within this grace window as 515-driven.
-  private static readonly STREAM_515_RECONNECT_GRACE_MS = 30_000;
-  // The numeric WhatsApp stream-error code that triggers the grace-period reconnect above.
-  private static readonly STREAM_ERROR_CODE_RECONNECT = '515';
 
   public stateConnection: wa.StateConnection = { state: 'close' };
 
@@ -299,50 +264,31 @@ export class BaileysStartupService extends ChannelStartupService {
     return this.stateConnection;
   }
 
-  private clearReconnectTimeout() {
-    if (this.reconnectTimeout) {
-      clearTimeout(this.reconnectTimeout);
-      this.reconnectTimeout = undefined;
-    }
-  }
+  public async logoutInstance() {
+    this.messageProcessor.onDestroy();
+    await this.client?.logout('Log out instance: ' + this.instanceName);
 
-  private async closeActiveClient(reason: string) {
-    this.clearReconnectTimeout();
-    // Invalidate the cached QR so a follow-up `connectToWhatsapp` cannot return
-    // the previous socket's stale QR — that's what made WhatsApp reject the
-    // scan ("same QR shown again and again"). Keep `count` so the QRCODE.LIMIT
-    // gate still works across retries.
-    if (this.instance.qrcode) {
-      this.instance.qrcode.base64 = undefined;
-      this.instance.qrcode.code = undefined;
-      this.instance.qrcode.pairingCode = undefined;
-    }
-    if (!this.client) return;
-    try {
-      this.client.ws?.close();
-      this.client.end(new Error(reason));
-    } catch {
-      // Ignore teardown races when the socket is already closed.
-    }
-  }
+    this.client?.ws?.close();
 
-  private async removePersistedCreds(): Promise<void> {
     const db = this.configService.get<Database>('DATABASE');
     const cache = this.configService.get<CacheConf>('CACHE');
     const provider = this.configService.get<ProviderSession>('PROVIDER');
 
     if (provider?.ENABLED) {
       const authState = await this.authStateProvider.authStateProvider(this.instance.id);
+
       await authState.removeCreds();
     }
 
     if (cache?.REDIS.ENABLED && cache?.REDIS.SAVE_INSTANCES) {
       const authState = await useMultiFileAuthStateRedisDb(this.instance.id, this.cache);
+
       await authState.removeCreds();
     }
 
     if (db.SAVE_DATA.INSTANCE) {
       const authState = await useMultiFileAuthStatePrisma(this.instance.id, this.cache);
+
       await authState.removeCreds();
     }
 
@@ -350,74 +296,6 @@ export class BaileysStartupService extends ChannelStartupService {
     if (sessionExists) {
       await this.prismaRepository.session.delete({ where: { sessionId: this.instanceId } });
     }
-  }
-
-  public async logoutInstance() {
-    // Mark instance as deleting to prevent reconnection attempts.
-    this.isDeleting = true;
-    this.endSession = true;
-
-    this.messageProcessor.onDestroy();
-
-    let baileysLogoutSucceeded = false;
-    if (this.client) {
-      // Baileys' logout() writes a `remove-companion-device` IQ stanza to the
-      // WS buffer and then immediately calls end() to close it. If we race
-      // against the WS flush, the IQ never reaches WhatsApp's servers and the
-      // phone's Linked Devices list still shows the session. Two safeguards:
-      //   1. only call logout() while the WS is actually open
-      //   2. await a brief flush window so the IQ leaves the host before we
-      //      let anything else touch the socket.
-      const wsState = (this.client.ws as any)?.readyState;
-      const WS_OPEN = 1;
-      if (wsState === WS_OPEN) {
-        try {
-          await this.client.logout('Log out instance: ' + this.instanceName);
-          baileysLogoutSucceeded = true;
-          // Give the OS ~600 ms to flush the IQ stanza to WhatsApp before any
-          // further forced socket teardown can drop it.
-          await new Promise((resolve) => setTimeout(resolve, 600));
-        } catch (error) {
-          this.logger.error({
-            msg: 'logoutInstance: client.logout() failed — WhatsApp may still show this device as linked. Unlink manually from your phone if needed.',
-            instanceName: this.instance.name,
-            error: (error as Error)?.message,
-          });
-        }
-      } else {
-        // WS was already closing/closed before user clicked Disconnect — no
-        // way to deliver the unlink signal. Surface this so the operator
-        // knows the WhatsApp-side session won't be revoked automatically.
-        this.logger.warn({
-          msg: 'logoutInstance: WS was not open — skipping client.logout(). WhatsApp linked-device entry will NOT be revoked; unlink it manually from the phone.',
-          instanceName: this.instance.name,
-          wsState,
-        });
-      }
-
-      if (!baileysLogoutSucceeded) {
-        // Force-close only when Baileys' own logout didn't already tear the
-        // socket down — otherwise this races with the IQ flush above.
-        try {
-          this.client.ws?.close();
-          this.client.end(new Error('Instance logout'));
-        } catch {
-          // ignore — ws may already be closed
-        }
-      }
-    }
-
-    // Force the in-memory connection state to 'close' so any concurrent reader
-    // observes the post-logout state immediately, even if the DB update below
-    // is delayed.
-    this.stateConnection = { state: 'close', statusReason: 401 };
-
-    await this.removePersistedCreds();
-
-    await this.prismaRepository.instance.update({
-      where: { id: this.instanceId },
-      data: { connectionStatus: 'close' },
-    });
   }
 
   public async getProfileName() {
@@ -454,18 +332,6 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   private async connectionUpdate({ qr, connection, lastDisconnect }: Partial<ConnectionState>) {
-    // Enhanced logging for connection updates
-    const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
-    this.logger.info({
-      message: 'Connection update received',
-      connection,
-      hasQr: !!qr,
-      statusCode,
-      instanceName: this.instance.name,
-      isDeleting: this.isDeleting,
-      endSession: this.endSession,
-    });
-
     if (qr) {
       if (this.instance.qrcode.count === this.configService.get<QrCode>('QRCODE').LIMIT) {
         this.sendDataWebhook(Events.QRCODE_UPDATED, {
@@ -558,80 +424,12 @@ export class BaileysStartupService extends ChannelStartupService {
     }
 
     if (connection === 'close') {
-      // Check if instance is being deleted or session is ending
-      if (this.isDeleting || this.endSession) {
-        this.logger.info('Instance is being deleted/ended, skipping reconnection attempt');
-        return;
-      }
-
       const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
-      // 408 (connection lost / timed out) was in this list per #2501, to stop a
-      // reconnect loop on transient network drops. But a code here is TERMINAL:
-      // the branch below emits `logout.instance`, which wipes the session
-      // credentials -- so an ordinary network blip forced a QR rescan, and the
-      // messages sent meanwhile came back only through history sync. The loop
-      // is a reconnect-too-fast problem, so it is now handled by exponential
-      // backoff (reconnectDelayMs) instead, and a network drop keeps its session.
       const codesToNotReconnect = [DisconnectReason.loggedOut, DisconnectReason.forbidden, 402, 406];
-
-      const recentStream515 = Date.now() - this._lastStream515At < BaileysStartupService.STREAM_515_RECONNECT_GRACE_MS;
-
-      // A close before the instance has authenticated (no wuid yet) usually
-      // means: QR session timed out / user closed the manager / WhatsApp
-      // rejected the pair. Auto-reconnecting in that case spins up a new QR
-      // before the user can scan the current one — the "Get QR Code keeps
-      // refreshing" loop. We stop and wait for an explicit user retry.
-      //
-      // EXCEPTION: stream:error 515 is part of the *normal* QR-scan handshake
-      // — Baileys closes the pairing socket with restartRequired before
-      // emitting `connection: 'open'`, so wuid is still undefined here. We
-      // must let that close fall through to the reconnect branch.
-      const isPreAuthClose = !this.instance.wuid && !recentStream515;
-
-      if (isPreAuthClose) {
-        this.logger.info('Pre-auth connection closed, waiting for explicit QR refresh...');
-        this.clearReconnectTimeout();
-        this.stateConnection = {
-          state: 'close',
-          statusReason: statusCode ?? DisconnectReason.connectionClosed,
-        };
-        await this.prismaRepository.instance.update({
-          where: { id: this.instanceId },
-          data: {
-            connectionStatus: 'close',
-            disconnectionAt: new Date(),
-            disconnectionReasonCode: statusCode ?? DisconnectReason.connectionClosed,
-            disconnectionObject: JSON.stringify(lastDisconnect ?? null),
-          },
-        });
-        return;
-      }
-
-      const shouldReconnect =
-        !codesToNotReconnect.includes(statusCode) || (statusCode === DisconnectReason.loggedOut && recentStream515);
-
-      this.logger.info({
-        message: 'Connection closed, evaluating reconnection',
-        statusCode,
-        shouldReconnect,
-        instanceName: this.instance.name,
-      });
-
-      watchmanService.onConnectionClosed(this.instance.name, { terminal: !shouldReconnect, statusCode });
-
+      const shouldReconnect = !codesToNotReconnect.includes(statusCode);
       if (shouldReconnect) {
-        // 3 s on the first retry, then exponential backoff capped at 5 min, so
-        // a persistent failure cannot spin into the loop #2501 described.
-        const delay = reconnectDelayMs(this.reconnectAttempts);
-        this.reconnectAttempts += 1;
-        this.logger.info(`Reconnecting in ${Math.round(delay / 1000)} seconds (attempt ${this.reconnectAttempts})...`);
-        this.clearReconnectTimeout();
-        this.reconnectTimeout = setTimeout(async () => {
-          await this.connectToWhatsapp(this.phoneNumber);
-        }, delay);
+        await this.connectToWhatsapp(this.phoneNumber);
       } else {
-        this.clearReconnectTimeout();
-        this.logger.info(`Skipping reconnection for status code ${statusCode} (code is in codesToNotReconnect list)`);
         this.sendDataWebhook(Events.STATUS_INSTANCE, {
           instance: this.instance.name,
           status: 'closed',
@@ -659,18 +457,14 @@ export class BaileysStartupService extends ChannelStartupService {
         }
 
         this.eventEmitter.emit('logout.instance', this.instance.name, 'inner');
-        await this.closeActiveClient('Close connection');
+        this.client?.ws?.close();
+        this.client.end(new Error('Close connection'));
 
         this.sendDataWebhook(Events.CONNECTION_UPDATE, { instance: this.instance.name, ...this.stateConnection });
       }
     }
 
     if (connection === 'open') {
-      if (!this.client?.user?.id) {
-        this.logger.warn('connectionUpdate: connection open but client.user is undefined, skipping');
-        return;
-      }
-      this.reconnectAttempts = 0;
       this.instance.wuid = this.client.user.id.replace(/:\d+/, '');
       try {
         const profilePic = await this.profilePicture(this.instance.wuid);
@@ -700,10 +494,6 @@ export class BaileysStartupService extends ChannelStartupService {
           profileName: (await this.getProfileName()) as string,
           profilePicUrl: this.instance.profilePictureUrl,
           connectionStatus: 'open',
-          // Clear so stale "loggedOut" doesn't trigger a creds-wipe on the
-          // next reconnect cycle (Baileys 515 restart).
-          disconnectionReasonCode: null,
-          disconnectionObject: null,
         },
       });
 
@@ -723,10 +513,6 @@ export class BaileysStartupService extends ChannelStartupService {
         profilePictureUrl: this.instance.profilePictureUrl,
         ...this.stateConnection,
       });
-
-      // Back online: cancel any pending alert and re-deliver whatever the
-      // downstream never accepted while we were away.
-      void watchmanService.onConnectionOpen(this.instance.name);
     }
 
     if (connection === 'connecting') {
@@ -736,27 +522,12 @@ export class BaileysStartupService extends ChannelStartupService {
 
   private async getMessage(key: proto.IMessageKey, full = false) {
     try {
-      const provider = this.configService.get<Database>('DATABASE').PROVIDER;
-
-      let webMessageInfo: proto.IWebMessageInfo[];
-
-      if (provider === 'mysql') {
-        // MySQL version
-        webMessageInfo = (await this.prismaRepository.$queryRaw`
-          SELECT * FROM Message
-          WHERE instanceId = ${this.instanceId}
-          AND JSON_UNQUOTE(JSON_EXTRACT(\`key\`, '$.id')) = ${key.id}
-          LIMIT 1
-        `) as proto.IWebMessageInfo[];
-      } else {
-        // PostgreSQL version
-        webMessageInfo = (await this.prismaRepository.$queryRaw`
-          SELECT * FROM "Message"
-          WHERE "instanceId" = ${this.instanceId}
-          AND "key"->>'id' = ${key.id}
-          LIMIT 1
-        `) as proto.IWebMessageInfo[];
-      }
+      // Use raw SQL to avoid JSON path issues
+      const webMessageInfo = (await this.prismaRepository.$queryRaw`
+        SELECT * FROM "Message"
+        WHERE "instanceId" = ${this.instanceId}
+        AND "key"->>'id' = ${key.id}
+      `) as proto.IWebMessageInfo[];
 
       if (full) {
         return webMessageInfo[0];
@@ -803,62 +574,35 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   private async createClient(number?: string): Promise<WASocket> {
-    await this.closeActiveClient('Recreate connection');
-
-    // If the previous session ended with creds-no-longer-valid (loggedOut from
-    // the phone, forbidden, replaced by another device), the persisted creds
-    // are dead — reusing them would trigger an instant 401 from WhatsApp and
-    // our pre-auth-close branch would stop before any QR could be emitted.
-    // Wipe them so this connect starts as a fresh login → fresh QR. The DB
-    // row is the source of truth after a server restart (in-memory state is
-    // reset to { state: 'close' } with no statusReason).
-    let priorReason: number | null | undefined = this.stateConnection.statusReason;
-    if (priorReason === undefined || priorReason === null) {
-      try {
-        const row = await this.prismaRepository.instance.findUnique({
-          where: { id: this.instanceId },
-          select: { disconnectionReasonCode: true },
-        });
-        priorReason = row?.disconnectionReasonCode ?? undefined;
-      } catch {
-        // Best-effort — fall through to normal connect.
-      }
-    }
-    if (
-      priorReason === DisconnectReason.loggedOut ||
-      priorReason === DisconnectReason.forbidden ||
-      priorReason === DisconnectReason.connectionReplaced
-    ) {
-      this.logger.info(`Wiping stale creds before reconnect (prior statusReason=${priorReason})`);
-      await this.removePersistedCreds();
-      this.stateConnection = { state: 'close' };
-    }
-
     this.instance.authState = await this.defineAuthState();
 
-    if (number) {
+    const session = this.configService.get<ConfigSessionPhone>('CONFIG_SESSION_PHONE');
+
+    let browserOptions = {};
+
+    if (number || this.phoneNumber) {
       this.phoneNumber = number;
+
       this.logger.info(`Phone number: ${number}`);
+    } else {
+      const browser: WABrowserDescription = [session.CLIENT, session.NAME, release()];
+      browserOptions = { browser };
+
+      this.logger.info(`Browser: ${browser}`);
     }
 
-    // Fetch latest WhatsApp Web version automatically
-    const baileysVersion = await fetchLatestWaWebVersion({}, this.cache);
+    const baileysVersion = await fetchLatestWaWebVersion({});
     const version = baileysVersion.version;
-
     const log = `Baileys version: ${version.join('.')}`;
-    this.logger.info(log);
 
-    const error = baileysVersion?.error ?? null;
-    if (error) {
-      this.logger.error(`Fetch latest WaWeb version error: ${JSON.stringify({ error })}`);
-    }
+    this.logger.info(log);
 
     this.logger.info(`Group Ignore: ${this.localSettings.groupsIgnore}`);
 
     let options;
 
     if (this.localProxy?.enabled) {
-      this.logger.verbose('Proxy enabled');
+      this.logger.info('Proxy enabled: ' + this.localProxy?.host);
 
       if (this.localProxy?.host?.includes('proxyscrape')) {
         try {
@@ -867,10 +611,9 @@ export class BaileysStartupService extends ChannelStartupService {
           const proxyUrls = text.split('\r\n');
           const rand = Math.floor(Math.random() * Math.floor(proxyUrls.length));
           const proxyUrl = 'http://' + proxyUrls[rand];
-          this.logger.info('Proxy url: ' + proxyUrl);
           options = { agent: makeProxyAgent(proxyUrl), fetchAgent: makeProxyAgentUndici(proxyUrl) };
-        } catch (error) {
-          this.logger.error(error);
+        } catch {
+          this.localProxy.enabled = false;
         }
       } else {
         options = {
@@ -903,13 +646,8 @@ export class BaileysStartupService extends ChannelStartupService {
       },
       msgRetryCounterCache: this.msgRetryCounterCache,
       generateHighQualityLinkPreview: true,
-      // A message whose stored row is gone must read as "no message": getMessage's fallback is an
-      // empty conversation, and a retry receipt would relay that blank to the recipient.
-      getMessage: async (key) => {
-        const stored = (await this.getMessage(key)) as proto.IMessage;
-        return stored?.conversation === '' ? undefined : stored;
-      },
-      // Removido browserOptions para usar Multi-Device nativo (não WebClient)
+      getMessage: async (key) => (await this.getMessage(key)) as Promise<proto.IMessage>,
+      ...browserOptions,
       markOnlineOnConnect: this.localSettings.alwaysOnline,
       retryRequestDelayMs: 350,
       maxMsgRetryCount: 4,
@@ -937,8 +675,19 @@ export class BaileysStartupService extends ChannelStartupService {
       userDevicesCache: this.userDevicesCache,
       transactionOpts: { maxCommitRetries: 10, delayBetweenTriesMs: 3000 },
       patchMessageBeforeSending(message) {
-        normalizeListType(message.deviceSentMessage?.message?.listMessage);
-        normalizeListType(message.listMessage);
+        if (
+          message.deviceSentMessage?.message?.listMessage?.listType === proto.Message.ListMessage.ListType.PRODUCT_LIST
+        ) {
+          message = JSON.parse(JSON.stringify(message));
+
+          message.deviceSentMessage.message.listMessage.listType = proto.Message.ListMessage.ListType.SINGLE_SELECT;
+        }
+
+        if (message.listMessage?.listType == proto.Message.ListMessage.ListType.PRODUCT_LIST) {
+          message = JSON.parse(JSON.stringify(message));
+
+          message.listMessage.listType = proto.Message.ListMessage.ListType.SINGLE_SELECT;
+        }
 
         return message;
       },
@@ -964,12 +713,6 @@ export class BaileysStartupService extends ChannelStartupService {
       console.log('CB:ack,class:call', packet);
       const payload = { event: 'CB:ack,class:call', packet: packet };
       this.sendDataWebhook(Events.CALL, payload, true, ['websocket']);
-    });
-
-    this.client.ws.on('CB:stream:error', (node: { attrs?: { code?: string | number } }) => {
-      if (String(node?.attrs?.code) === BaileysStartupService.STREAM_ERROR_CODE_RECONNECT) {
-        this._lastStream515At = Date.now();
-      }
     });
 
     this.phoneNumber = number;
@@ -1197,16 +940,6 @@ export class BaileysStartupService extends ChannelStartupService {
       syncType?: proto.HistorySync.HistorySyncType;
     }) => {
       try {
-        const normalizedProgress = progress ?? -1;
-
-        if (normalizedProgress <= this.historySyncLastProgress) {
-          this.historySyncMessageCount = 0;
-          this.historySyncChatCount = 0;
-          this.historySyncContactCount = 0;
-        }
-
-        this.historySyncLastProgress = normalizedProgress;
-
         if (syncType === proto.HistorySync.HistorySyncType.ON_DEMAND) {
           console.log('received on-demand history sync, messages=', messages);
         }
@@ -1234,29 +967,14 @@ export class BaileysStartupService extends ChannelStartupService {
         }
 
         const contactsMap = new Map();
-        const contactsMapLidJid = new Map();
 
         for (const contact of contacts) {
-          let jid = null;
-
-          if (contact?.id?.search('@lid') !== -1) {
-            if (contact.phoneNumber) {
-              jid = contact.phoneNumber;
-            }
-          }
-
-          if (!jid) {
-            jid = contact?.id;
-          }
-
           if (contact.id && (contact.notify || contact.name)) {
-            contactsMap.set(contact.id, { name: contact.name ?? contact.notify, jid });
+            contactsMap.set(contact.id, { name: contact.name ?? contact.notify, jid: contact.id });
           }
-
-          contactsMapLidJid.set(contact.id, { jid });
         }
 
-        const chatsRaw: { remoteJid: string; remoteLid: string; instanceId: string; name?: string }[] = [];
+        const chatsRaw: { remoteJid: string; instanceId: string; name?: string }[] = [];
         const chatsRepository = new Set(
           (await this.prismaRepository.chat.findMany({ where: { instanceId: this.instanceId } })).map(
             (chat) => chat.remoteJid,
@@ -1268,42 +986,14 @@ export class BaileysStartupService extends ChannelStartupService {
             continue;
           }
 
-          let remoteJid = null;
-          let remoteLid = null;
-
-          if (chat.id.search('@lid') !== -1) {
-            const contact = contactsMapLidJid.get(chat.id);
-
-            remoteLid = chat.id;
-
-            if (contact && contact.jid) {
-              remoteJid = contact.jid;
-            }
-          }
-
-          if (!remoteLid && chat.accountLid && chat.accountLid.search('@lid') !== -1) {
-            remoteLid = chat.accountLid;
-          }
-
-          if (!remoteJid) {
-            remoteJid = chat.id;
-          }
-
-          chatsRaw.push({ remoteJid, remoteLid, instanceId: this.instanceId, name: chat.name });
+          chatsRaw.push({ remoteJid: chat.id, instanceId: this.instanceId, name: chat.name });
         }
-
-        if (this.configService.get<Database>('DATABASE').SAVE_DATA.HISTORIC) {
-          const chatsToCreateMany = JSON.parse(JSON.stringify(chatsRaw)).map((chat) => {
-            delete chat.remoteLid;
-            return chat;
-          });
-
-          await this.prismaRepository.chat.createMany({ data: chatsToCreateMany, skipDuplicates: true });
-        }
-
-        this.historySyncChatCount += chatsRaw.length;
 
         this.sendDataWebhook(Events.CHATS_SET, chatsRaw);
+
+        if (this.configService.get<Database>('DATABASE').SAVE_DATA.HISTORIC) {
+          await this.prismaRepository.chat.createMany({ data: chatsRaw, skipDuplicates: true });
+        }
 
         const messagesRaw: any[] = [];
 
@@ -1356,32 +1046,14 @@ export class BaileysStartupService extends ChannelStartupService {
           messagesRaw.push(this.prepareMessage(m));
         }
 
-        this.historySyncMessageCount += messagesRaw.length;
-
-        if (this.configService.get<Database>('DATABASE').SAVE_DATA.HISTORIC) {
-          await this.prismaRepository.message.createMany({ data: messagesRaw, skipDuplicates: true });
-        }
-
-        // History sync goes out as MESSAGES_SET, which the downstream ignores,
-        // so these stay pending until the watchman replays them as upserts.
-        await watchmanService.recordInbound(
-          this.instance.name,
-          this.instanceId,
-          messagesRaw.map((m: any) => ({
-            record: {
-              keyId: m.key?.id,
-              remoteJid: m.key?.remoteJid,
-              fromMe: m.key?.fromMe,
-              messageTimestamp: m.messageTimestamp,
-            },
-            payload: m,
-          })),
-        );
-
         this.sendDataWebhook(Events.MESSAGES_SET, [...messagesRaw], true, undefined, {
           isLatest,
           progress,
         });
+
+        if (this.configService.get<Database>('DATABASE').SAVE_DATA.HISTORIC) {
+          await this.prismaRepository.message.createMany({ data: messagesRaw, skipDuplicates: true });
+        }
 
         if (
           this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
@@ -1395,25 +1067,8 @@ export class BaileysStartupService extends ChannelStartupService {
           );
         }
 
-        const filteredContacts = contacts.filter((c) => !!c.notify || !!c.name);
-        this.historySyncContactCount += filteredContacts.length;
-
-        if (normalizedProgress === 100) {
-          this.sendDataWebhook(Events.MESSAGING_HISTORY_SET, {
-            messageCount: this.historySyncMessageCount,
-            chatCount: this.historySyncChatCount,
-            contactCount: this.historySyncContactCount,
-            progress: normalizedProgress,
-          });
-
-          this.historySyncMessageCount = 0;
-          this.historySyncChatCount = 0;
-          this.historySyncContactCount = 0;
-          this.historySyncLastProgress = -1;
-        }
-
         await this.contactHandle['contacts.upsert'](
-          filteredContacts.map((c) => ({ id: c.id, name: c.name ?? c.notify })),
+          contacts.filter((c) => !!c.notify || !!c.name).map((c) => ({ id: c.id, name: c.name ?? c.notify })),
         );
 
         contacts = undefined;
@@ -1430,319 +1085,376 @@ export class BaileysStartupService extends ChannelStartupService {
     ) => {
       try {
         for (const received of messages) {
-          // Each message is isolated. One throw here -- a database error, a
-          // malformed payload -- used to abort the whole batch through the single
-          // try/catch below, and offline messages arrive after a reconnect as ONE
-          // consolidated batch, so one bad message lost every message after it.
-          try {
-            if (
-              received?.messageStubParameters?.some?.((param) =>
-                [
-                  'No matching sessions found for message',
-                  'Bad MAC',
-                  'failed to decrypt message',
-                  'SessionError',
-                  'Invalid PreKey ID',
-                  'No session record',
-                  'No session found to decrypt message',
-                  'Message absent from node',
-                ].some((err) => param?.includes?.(err)),
-              )
-            ) {
-              this.logger.warn(`Message ignored with messageStubParameters: ${JSON.stringify(received, null, 2)}`);
-              continue;
-            }
-            if (received.message?.conversation || received.message?.extendedTextMessage?.text) {
-              const text = received.message?.conversation || received.message?.extendedTextMessage?.text;
+          if (
+            received?.messageStubParameters?.some?.((param) =>
+              [
+                'No matching sessions found for message',
+                'Bad MAC',
+                'failed to decrypt message',
+                'SessionError',
+                'Invalid PreKey ID',
+                'No session record',
+                'No session found to decrypt message',
+                'Message absent from node',
+              ].some((err) => param?.includes?.(err)),
+            )
+          ) {
+            this.logger.warn(`Message ignored with messageStubParameters: ${JSON.stringify(received, null, 2)}`);
+            continue;
+          }
+          if (received.message?.conversation || received.message?.extendedTextMessage?.text) {
+            const text = received.message?.conversation || received.message?.extendedTextMessage?.text;
 
-              if (text == 'requestPlaceholder' && !requestId) {
-                const messageId = await this.client.requestPlaceholderResend(received.key);
+            if (text == 'requestPlaceholder' && !requestId) {
+              const messageId = await this.client.requestPlaceholderResend(received.key);
 
-                console.log('requested placeholder resync, id=', messageId);
-              } else if (requestId) {
-                console.log('Message received from phone, id=', requestId, received);
-              }
-
-              if (text == 'onDemandHistSync') {
-                const messageId = await this.client.fetchMessageHistory(50, received.key, received.messageTimestamp!);
-                console.log('requested on-demand sync, id=', messageId);
-              }
+              console.log('requested placeholder resync, id=', messageId);
+            } else if (requestId) {
+              console.log('Message received from phone, id=', requestId, received);
             }
 
-            const editedMessage =
-              received?.message?.protocolMessage || received?.message?.editedMessage?.message?.protocolMessage;
-
-            if (editedMessage) {
-              if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled)
-                this.chatwootService.eventWhatsapp(
-                  'messages.edit',
-                  { instanceName: this.instance.name, instanceId: this.instance.id },
-                  editedMessage,
-                );
-
-              await this.sendDataWebhook(Events.MESSAGES_EDITED, editedMessage);
-
-              if (received.key?.id && editedMessage.key?.id) {
-                await this.baileysCache.set(`protocol_${received.key.id}`, editedMessage.key.id, 60 * 60 * 24);
-              }
-
-              const oldMessage = await this.getMessage(editedMessage.key, true);
-              if ((oldMessage as any)?.id) {
-                const editedMessageTimestamp = Long.isLong(received?.messageTimestamp)
-                  ? Math.floor(received?.messageTimestamp.toNumber())
-                  : Math.floor(received?.messageTimestamp as number);
-
-                await this.prismaRepository.message.update({
-                  where: { id: (oldMessage as any).id },
-                  data: {
-                    message: editedMessage.editedMessage as any,
-                    messageTimestamp: editedMessageTimestamp,
-                    status: 'EDITED',
-                  },
-                });
-                await this.prismaRepository.messageUpdate.create({
-                  data: {
-                    fromMe: editedMessage.key.fromMe,
-                    keyId: editedMessage.key.id,
-                    remoteJid: editedMessage.key.remoteJid,
-                    status: 'EDITED',
-                    instanceId: this.instanceId,
-                    messageId: (oldMessage as any).id,
-                  },
-                });
-              }
+            if (text == 'onDemandHistSync') {
+              const messageId = await this.client.fetchMessageHistory(50, received.key, received.messageTimestamp!);
+              console.log('requested on-demand sync, id=', messageId);
             }
+          }
 
-            if ((type !== 'notify' && type !== 'append') || editedMessage || !received?.message) {
-              continue;
-            }
+          const editedMessage =
+            received?.message?.protocolMessage || received?.message?.editedMessage?.message?.protocolMessage;
 
-            if (Long.isLong(received.messageTimestamp)) {
-              received.messageTimestamp = received.messageTimestamp?.toNumber();
-            }
-
-            if (settings?.groupsIgnore && received.key.remoteJid.includes('@g.us')) {
-              continue;
-            }
-
-            const existingChat = await this.prismaRepository.chat.findFirst({
-              where: { instanceId: this.instanceId, remoteJid: received.key.remoteJid },
-              select: { id: true, name: true },
-            });
-
-            if (
-              existingChat &&
-              received.pushName &&
-              existingChat.name !== received.pushName &&
-              received.pushName.trim().length > 0 &&
-              !received.key.fromMe &&
-              !received.key.remoteJid.includes('@g.us')
-            ) {
-              this.sendDataWebhook(Events.CHATS_UPSERT, [{ ...existingChat, name: received.pushName }]);
-              if (this.configService.get<Database>('DATABASE').SAVE_DATA.CHATS) {
-                try {
-                  await this.prismaRepository.chat.update({
-                    where: { id: existingChat.id },
-                    data: { name: received.pushName },
-                  });
-                } catch {
-                  console.log(`Chat insert record ignored: ${received.key.remoteJid} - ${this.instanceId}`);
-                }
-              }
-            }
-
-            const messageRaw = this.prepareMessage(received) as any;
-
-            if (messageRaw.messageType === 'pollUpdateMessage') {
-              const pollCreationKey = (messageRaw.message as any).pollUpdateMessage.pollCreationMessageKey;
-              const pollMessage = (await this.getMessage(pollCreationKey, true)) as proto.IWebMessageInfo;
-              const pollMessageSecret = (await this.getMessage(pollCreationKey)) as any;
-
-              if (pollMessage) {
-                const pollOptions =
-                  (pollMessage.message as any).pollCreationMessage?.options ||
-                  (pollMessage.message as any).pollCreationMessageV3?.options ||
-                  [];
-                const pollVote = (messageRaw.message as any).pollUpdateMessage.vote;
-
-                const voterJid = received.key.fromMe
-                  ? this.instance.wuid
-                  : received.key.participant || received.key.remoteJid;
-
-                let pollEncKey = pollMessageSecret?.messageContextInfo?.messageSecret;
-
-                let successfulVoterJid = voterJid;
-
-                if (typeof pollEncKey === 'string') {
-                  pollEncKey = Buffer.from(pollEncKey, 'base64');
-                } else if (pollEncKey?.type === 'Buffer' && Array.isArray(pollEncKey.data)) {
-                  pollEncKey = Buffer.from(pollEncKey.data);
-                }
-
-                if (Buffer.isBuffer(pollEncKey) && pollEncKey.length === 44) {
-                  pollEncKey = Buffer.from(pollEncKey.toString('utf8'), 'base64');
-                }
-
-                if (pollVote.encPayload && pollEncKey) {
-                  const creatorCandidates = [
-                    this.instance.wuid,
-                    this.client.user?.lid,
-                    pollMessage.key.participant,
-                    (pollMessage.key as any).participantAlt,
-                    pollMessage.key.remoteJid,
-                  ];
-
-                  const key = received.key as any;
-                  const voterCandidates = [
-                    this.instance.wuid,
-                    this.client.user?.lid,
-                    key.participant,
-                    key.participantAlt,
-                    key.remoteJidAlt,
-                    key.remoteJid,
-                  ];
-
-                  const uniqueCreators = [
-                    ...new Set(creatorCandidates.filter(Boolean).map((id) => jidNormalizedUser(id))),
-                  ];
-                  const uniqueVoters = [...new Set(voterCandidates.filter(Boolean).map((id) => jidNormalizedUser(id)))];
-
-                  let decryptedVote;
-
-                  for (const creator of uniqueCreators) {
-                    for (const voter of uniqueVoters) {
-                      try {
-                        decryptedVote = decryptPollVote(pollVote, {
-                          pollCreatorJid: creator,
-                          pollMsgId: pollMessage.key.id,
-                          pollEncKey,
-                          voterJid: voter,
-                        } as any);
-                        if (decryptedVote) {
-                          successfulVoterJid = voter;
-                          break;
-                        }
-                      } catch {
-                        // Continue trying
-                      }
-                    }
-                    if (decryptedVote) break;
-                  }
-
-                  if (decryptedVote) {
-                    Object.assign(pollVote, decryptedVote);
-                  }
-                }
-
-                const selectedOptions = pollVote?.selectedOptions || [];
-
-                const selectedOptionNames = pollOptions
-                  .filter((option) => {
-                    const hash = createHash('sha256').update(option.optionName).digest();
-                    return selectedOptions.some((selected) => Buffer.compare(selected, hash) === 0);
-                  })
-                  .map((option) => option.optionName);
-
-                (messageRaw.message as any).pollUpdateMessage.vote.selectedOptions = selectedOptionNames;
-
-                const pollUpdates = pollOptions.map((option) => ({
-                  name: option.optionName,
-                  voters: selectedOptionNames.includes(option.optionName) ? [successfulVoterJid] : [],
-                }));
-
-                (messageRaw as any).pollUpdates = pollUpdates;
-              }
-            }
-
-            const isMedia =
-              received?.message?.imageMessage ||
-              received?.message?.videoMessage ||
-              received?.message?.stickerMessage ||
-              received?.message?.documentMessage ||
-              received?.message?.documentWithCaptionMessage ||
-              received?.message?.ptvMessage ||
-              received?.message?.audioMessage;
-
-            const isVideo = received?.message?.videoMessage;
-
-            if (this.localSettings.readMessages && received.key.id !== 'status@broadcast') {
-              await this.client.readMessages([received.key]);
-            }
-
-            if (this.localSettings.readStatus && received.key.id === 'status@broadcast') {
-              await this.client.readMessages([received.key]);
-            }
-
-            if (
-              this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
-              this.localChatwoot?.enabled &&
-              !received.key.id.includes('@broadcast')
-            ) {
-              const chatwootSentMessage = await this.chatwootService.eventWhatsapp(
-                Events.MESSAGES_UPSERT,
-                { instanceName: this.instance.name, instanceId: this.instanceId },
-                messageRaw,
+          if (editedMessage) {
+            if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled)
+              this.chatwootService.eventWhatsapp(
+                'messages.edit',
+                { instanceName: this.instance.name, instanceId: this.instance.id },
+                editedMessage,
               );
 
-              if (chatwootSentMessage?.id) {
-                messageRaw.chatwootMessageId = chatwootSentMessage.id;
-                messageRaw.chatwootInboxId = chatwootSentMessage.inbox_id;
-                messageRaw.chatwootConversationId = chatwootSentMessage.conversation_id;
-              }
+            await this.sendDataWebhook(Events.MESSAGES_EDITED, editedMessage);
+
+            if (received.key?.id && editedMessage.key?.id) {
+              await this.baileysCache.set(`protocol_${received.key.id}`, editedMessage.key.id, 60 * 60 * 24);
             }
 
-            if (this.configService.get<Openai>('OPENAI').ENABLED && received?.message?.audioMessage) {
-              const openAiDefaultSettings = await this.prismaRepository.openaiSetting.findFirst({
-                where: { instanceId: this.instanceId },
-                include: { OpenaiCreds: true },
+            const oldMessage = await this.getMessage(editedMessage.key, true);
+            if ((oldMessage as any)?.id) {
+              const editedMessageTimestamp = Long.isLong(received?.messageTimestamp)
+                ? Math.floor(received?.messageTimestamp.toNumber())
+                : Math.floor(received?.messageTimestamp as number);
+
+              await this.prismaRepository.message.update({
+                where: { id: (oldMessage as any).id },
+                data: {
+                  message: editedMessage.editedMessage as any,
+                  messageTimestamp: editedMessageTimestamp,
+                  status: 'EDITED',
+                },
               });
+              await this.prismaRepository.messageUpdate.create({
+                data: {
+                  fromMe: editedMessage.key.fromMe,
+                  keyId: editedMessage.key.id,
+                  remoteJid: editedMessage.key.remoteJid,
+                  status: 'EDITED',
+                  instanceId: this.instanceId,
+                  messageId: (oldMessage as any).id,
+                },
+              });
+            }
+          }
 
-              if (openAiDefaultSettings && openAiDefaultSettings.openaiCredsId && openAiDefaultSettings.speechToText) {
-                (messageRaw.message as any).speechToText =
-                  `[audio] ${await this.openaiService.speechToText(received, this)}`;
+          if ((type !== 'notify' && type !== 'append') || editedMessage || !received?.message) {
+            continue;
+          }
+
+          if (Long.isLong(received.messageTimestamp)) {
+            received.messageTimestamp = received.messageTimestamp?.toNumber();
+          }
+
+          if (settings?.groupsIgnore && received.key.remoteJid.includes('@g.us')) {
+            continue;
+          }
+
+          const existingChat = await this.prismaRepository.chat.findFirst({
+            where: { instanceId: this.instanceId, remoteJid: received.key.remoteJid },
+            select: { id: true, name: true },
+          });
+
+          if (
+            existingChat &&
+            received.pushName &&
+            existingChat.name !== received.pushName &&
+            received.pushName.trim().length > 0 &&
+            !received.key.fromMe &&
+            !received.key.remoteJid.includes('@g.us')
+          ) {
+            this.sendDataWebhook(Events.CHATS_UPSERT, [{ ...existingChat, name: received.pushName }]);
+            if (this.configService.get<Database>('DATABASE').SAVE_DATA.CHATS) {
+              try {
+                await this.prismaRepository.chat.update({
+                  where: { id: existingChat.id },
+                  data: { name: received.pushName },
+                });
+              } catch {
+                console.log(`Chat insert record ignored: ${received.key.remoteJid} - ${this.instanceId}`);
               }
             }
+          }
 
-            if (this.configService.get<Database>('DATABASE').SAVE_DATA.NEW_MESSAGE) {
-              // eslint-disable-next-line @typescript-eslint/no-unused-vars
-              const { pollUpdates, ...messageData } = messageRaw as any;
-              const msg = await this.prismaRepository.message.create({ data: messageData });
+          const messageRaw = this.prepareMessage(received);
 
-              const { remoteJid } = received.key;
-              const timestamp = msg.messageTimestamp;
-              const fromMe = received.key.fromMe.toString();
-              const messageKey = `${remoteJid}_${timestamp}_${fromMe}`;
+          if (messageRaw.messageType === 'pollUpdateMessage') {
+            const pollCreationKey = messageRaw.message.pollUpdateMessage.pollCreationMessageKey;
+            const pollMessage = (await this.getMessage(pollCreationKey, true)) as proto.IWebMessageInfo;
+            const pollMessageSecret = (await this.getMessage(pollCreationKey)) as any;
 
-              const cachedTimestamp = await this.baileysCache.get(messageKey);
+            if (pollMessage) {
+              const pollOptions =
+                (pollMessage.message as any).pollCreationMessage?.options ||
+                (pollMessage.message as any).pollCreationMessageV3?.options ||
+                [];
+              const pollVote = messageRaw.message.pollUpdateMessage.vote;
 
-              if (!cachedTimestamp) {
-                if (!received.key.fromMe) {
-                  if (msg.status === status[3]) {
-                    this.logger.log(`Update not read messages ${remoteJid}`);
-                    await this.updateChatUnreadMessages(remoteJid);
-                  } else if (msg.status === status[4]) {
-                    this.logger.log(`Update readed messages ${remoteJid} - ${timestamp}`);
-                    await this.updateMessagesReadedByTimestamp(remoteJid, timestamp);
+              const voterJid = received.key.fromMe
+                ? this.instance.wuid
+                : received.key.participant || received.key.remoteJid;
+
+              let pollEncKey = pollMessageSecret?.messageContextInfo?.messageSecret;
+
+              let successfulVoterJid = voterJid;
+
+              if (typeof pollEncKey === 'string') {
+                pollEncKey = Buffer.from(pollEncKey, 'base64');
+              } else if (pollEncKey?.type === 'Buffer' && Array.isArray(pollEncKey.data)) {
+                pollEncKey = Buffer.from(pollEncKey.data);
+              }
+
+              if (Buffer.isBuffer(pollEncKey) && pollEncKey.length === 44) {
+                pollEncKey = Buffer.from(pollEncKey.toString('utf8'), 'base64');
+              }
+
+              if (pollVote.encPayload && pollEncKey) {
+                const creatorCandidates = [
+                  this.instance.wuid,
+                  this.client.user?.lid,
+                  pollMessage.key.participant,
+                  (pollMessage.key as any).participantAlt,
+                  pollMessage.key.remoteJid,
+                ];
+
+                const key = received.key as any;
+                const voterCandidates = [
+                  this.instance.wuid,
+                  this.client.user?.lid,
+                  key.participant,
+                  key.participantAlt,
+                  key.remoteJidAlt,
+                  key.remoteJid,
+                ];
+
+                const uniqueCreators = [
+                  ...new Set(creatorCandidates.filter(Boolean).map((id) => jidNormalizedUser(id))),
+                ];
+                const uniqueVoters = [...new Set(voterCandidates.filter(Boolean).map((id) => jidNormalizedUser(id)))];
+
+                let decryptedVote;
+
+                for (const creator of uniqueCreators) {
+                  for (const voter of uniqueVoters) {
+                    try {
+                      decryptedVote = decryptPollVote(pollVote, {
+                        pollCreatorJid: creator,
+                        pollMsgId: pollMessage.key.id,
+                        pollEncKey,
+                        voterJid: voter,
+                      } as any);
+                      if (decryptedVote) {
+                        successfulVoterJid = voter;
+                        break;
+                      }
+                    } catch {
+                      // Continue trying
+                    }
                   }
-                } else {
-                  // is send message by me
+                  if (decryptedVote) break;
+                }
+
+                if (decryptedVote) {
+                  Object.assign(pollVote, decryptedVote);
+                }
+              }
+
+              const selectedOptions = pollVote?.selectedOptions || [];
+
+              const selectedOptionNames = pollOptions
+                .filter((option) => {
+                  const hash = createHash('sha256').update(option.optionName).digest();
+                  return selectedOptions.some((selected) => Buffer.compare(selected, hash) === 0);
+                })
+                .map((option) => option.optionName);
+
+              messageRaw.message.pollUpdateMessage.vote.selectedOptions = selectedOptionNames;
+
+              const pollUpdates = pollOptions.map((option) => ({
+                name: option.optionName,
+                voters: selectedOptionNames.includes(option.optionName) ? [successfulVoterJid] : [],
+              }));
+
+              messageRaw.pollUpdates = pollUpdates;
+            }
+          }
+
+          const isMedia =
+            received?.message?.imageMessage ||
+            received?.message?.videoMessage ||
+            received?.message?.stickerMessage ||
+            received?.message?.documentMessage ||
+            received?.message?.documentWithCaptionMessage ||
+            received?.message?.ptvMessage ||
+            received?.message?.audioMessage;
+
+          const isVideo = received?.message?.videoMessage;
+
+          if (this.localSettings.readMessages && received.key.id !== 'status@broadcast') {
+            await this.client.readMessages([received.key]);
+          }
+
+          if (this.localSettings.readStatus && received.key.id === 'status@broadcast') {
+            await this.client.readMessages([received.key]);
+          }
+
+          if (
+            this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
+            this.localChatwoot?.enabled &&
+            !received.key.id.includes('@broadcast')
+          ) {
+            const chatwootSentMessage = await this.chatwootService.eventWhatsapp(
+              Events.MESSAGES_UPSERT,
+              { instanceName: this.instance.name, instanceId: this.instanceId },
+              messageRaw,
+            );
+
+            if (chatwootSentMessage?.id) {
+              messageRaw.chatwootMessageId = chatwootSentMessage.id;
+              messageRaw.chatwootInboxId = chatwootSentMessage.inbox_id;
+              messageRaw.chatwootConversationId = chatwootSentMessage.conversation_id;
+            }
+          }
+
+          if (this.configService.get<Openai>('OPENAI').ENABLED && received?.message?.audioMessage) {
+            const openAiDefaultSettings = await this.prismaRepository.openaiSetting.findFirst({
+              where: { instanceId: this.instanceId },
+              include: { OpenaiCreds: true },
+            });
+
+            if (openAiDefaultSettings && openAiDefaultSettings.openaiCredsId && openAiDefaultSettings.speechToText) {
+              messageRaw.message.speechToText = `[audio] ${await this.openaiService.speechToText(received, this)}`;
+            }
+          }
+
+          if (this.configService.get<Database>('DATABASE').SAVE_DATA.NEW_MESSAGE) {
+            // eslint-disable-next-line @typescript-eslint/no-unused-vars
+            const { pollUpdates, ...messageData } = messageRaw;
+            const msg = await this.prismaRepository.message.create({ data: messageData });
+
+            const { remoteJid } = received.key;
+            const timestamp = msg.messageTimestamp;
+            const fromMe = received.key.fromMe.toString();
+            const messageKey = `${remoteJid}_${timestamp}_${fromMe}`;
+
+            const cachedTimestamp = await this.baileysCache.get(messageKey);
+
+            if (!cachedTimestamp) {
+              if (!received.key.fromMe) {
+                if (msg.status === status[3]) {
+                  this.logger.log(`Update not read messages ${remoteJid}`);
+                  await this.updateChatUnreadMessages(remoteJid);
+                } else if (msg.status === status[4]) {
                   this.logger.log(`Update readed messages ${remoteJid} - ${timestamp}`);
                   await this.updateMessagesReadedByTimestamp(remoteJid, timestamp);
                 }
-
-                await this.baileysCache.set(messageKey, true, this.MESSAGE_CACHE_TTL_SECONDS);
               } else {
-                this.logger.info(`Update readed messages duplicated ignored [avoid deadlock]: ${messageKey}`);
+                // is send message by me
+                this.logger.log(`Update readed messages ${remoteJid} - ${timestamp}`);
+                await this.updateMessagesReadedByTimestamp(remoteJid, timestamp);
               }
 
-              if (isMedia && this.configService.get<S3>('S3').ENABLE) {
-                await this.uploadInboundMediaToS3(received, msg, messageRaw, Boolean(isVideo));
-              }
+              await this.baileysCache.set(messageKey, true, this.MESSAGE_CACHE_TTL_SECONDS);
+            } else {
+              this.logger.info(`Update readed messages duplicated ignored [avoid deadlock]: ${messageKey}`);
             }
 
-            if (this.localWebhook.enabled) {
-              if (isMedia && this.localWebhook.webhookBase64) {
+            if (isMedia) {
+              if (this.configService.get<S3>('S3').ENABLE) {
                 try {
+                  if (isVideo && !this.configService.get<S3>('S3').SAVE_VIDEO) {
+                    this.logger.warn('Video upload is disabled. Skipping video upload.');
+                    // Skip video upload by returning early from this block
+                    return;
+                  }
+
+                  const message: any = received;
+
+                  // Verificação adicional para garantir que há conteúdo de mídia real
+                  const hasRealMedia = this.hasValidMediaContent(message);
+
+                  if (!hasRealMedia) {
+                    this.logger.warn('Message detected as media but contains no valid media content');
+                  } else {
+                    const media = await this.getBase64FromMediaMessage({ message }, true);
+
+                    if (!media) {
+                      this.logger.verbose('No valid media to upload (messageContextInfo only), skipping MinIO');
+                      return;
+                    }
+
+                    const { buffer, mediaType, fileName, size } = media;
+                    const mimetype = mimeTypes.lookup(fileName).toString();
+                    const fullName = join(
+                      `${this.instance.id}`,
+                      received.key.remoteJid,
+                      mediaType,
+                      `${Date.now()}_${fileName}`,
+                    );
+                    await s3Service.uploadFile(fullName, buffer, size.fileLength?.low, { 'Content-Type': mimetype });
+
+                    await this.prismaRepository.media.create({
+                      data: {
+                        messageId: msg.id,
+                        instanceId: this.instanceId,
+                        type: mediaType,
+                        fileName: fullName,
+                        mimetype,
+                      },
+                    });
+
+                    const mediaUrl = await s3Service.getObjectUrl(fullName);
+
+                    messageRaw.message.mediaUrl = mediaUrl;
+
+                    await this.prismaRepository.message.update({ where: { id: msg.id }, data: messageRaw });
+                  }
+                } catch (error) {
+                  this.logger.error(['Error on upload file to minio', error?.message, error?.stack]);
+                }
+              }
+            }
+          }
+
+          if (this.localWebhook.enabled) {
+            if (isMedia && this.localWebhook.webhookBase64) {
+              try {
+                const buffer = await downloadMediaMessage(
+                  { key: received.key, message: received?.message },
+                  'buffer',
+                  {},
+                  { logger: P({ level: 'error' }) as any, reuploadRequest: this.client.updateMediaMessage },
+                );
+
+                if (buffer) {
+                  messageRaw.message.base64 = buffer.toString('base64');
+                } else {
+                  // retry to download media
                   const buffer = await downloadMediaMessage(
                     { key: received.key, message: received?.message },
                     'buffer',
@@ -1751,130 +1463,92 @@ export class BaileysStartupService extends ChannelStartupService {
                   );
 
                   if (buffer) {
-                    (messageRaw.message as any).base64 = buffer.toString('base64');
-                  } else {
-                    // retry to download media
-                    const buffer = await downloadMediaMessage(
-                      { key: received.key, message: received?.message },
-                      'buffer',
-                      {},
-                      { logger: P({ level: 'error' }) as any, reuploadRequest: this.client.updateMediaMessage },
-                    );
-
-                    if (buffer) {
-                      (messageRaw.message as any).base64 = buffer.toString('base64');
-                    }
+                    messageRaw.message.base64 = buffer.toString('base64');
                   }
-                } catch (error) {
-                  this.logger.error(['Error converting media to base64', error?.message]);
                 }
+              } catch (error) {
+                this.logger.error(['Error converting media to base64', error?.message]);
               }
             }
+          }
 
-            this.logger.verbose(messageRaw);
+          this.logger.verbose(messageRaw);
 
-            if (messageRaw.key.remoteJid?.includes('@lid') && messageRaw.key.remoteJidAlt) {
-              const lid = messageRaw.key.remoteJid;
+          sendTelemetry(`received.message.${messageRaw.messageType ?? 'unknown'}`);
+          if (messageRaw.key.remoteJid?.includes('@lid') && messageRaw.key.remoteJidAlt) {
+            messageRaw.key.remoteJid = messageRaw.key.remoteJidAlt;
+          }
+          console.log(messageRaw);
 
-              messageRaw.key.remoteJid = messageRaw.key.remoteJidAlt;
-              messageRaw.key.remoteJidAlt = lid;
+          this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
 
-              messageRaw.key.addressingMode = 'pn';
-            }
+          await chatbotController.emit({
+            instance: { instanceName: this.instance.name, instanceId: this.instanceId },
+            remoteJid: messageRaw.key.remoteJid,
+            msg: messageRaw,
+            pushName: messageRaw.pushName,
+          });
 
-            await watchmanService.recordInbound(this.instance.name, this.instanceId, [
+          const contact = await this.prismaRepository.contact.findFirst({
+            where: { remoteJid: received.key.remoteJid, instanceId: this.instanceId },
+          });
+
+          const contactRaw: {
+            remoteJid: string;
+            pushName: string;
+            profilePicUrl?: string;
+            instanceId: string;
+          } = {
+            remoteJid: received.key.remoteJid,
+            pushName: received.key.fromMe ? '' : received.key.fromMe == null ? '' : received.pushName,
+            profilePicUrl: (await this.profilePicture(received.key.remoteJid)).profilePictureUrl,
+            instanceId: this.instanceId,
+          };
+
+          if (contactRaw.remoteJid === 'status@broadcast') {
+            continue;
+          }
+
+          if (contactRaw.remoteJid.includes('@s.whatsapp') || contactRaw.remoteJid.includes('@lid')) {
+            await saveOnWhatsappCache([
               {
-                record: {
-                  keyId: messageRaw.key?.id,
-                  remoteJid: messageRaw.key?.remoteJid,
-                  fromMe: messageRaw.key?.fromMe,
-                  messageTimestamp: messageRaw.messageTimestamp,
-                },
-                payload: messageRaw,
+                remoteJid:
+                  messageRaw.key.addressingMode === 'lid' ? messageRaw.key.remoteJidAlt : messageRaw.key.remoteJid,
+                remoteJidAlt: messageRaw.key.remoteJidAlt,
+                lid: messageRaw.key.addressingMode === 'lid' ? 'lid' : null,
               },
             ]);
+          }
 
-            this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
+          if (contact) {
+            this.sendDataWebhook(Events.CONTACTS_UPDATE, contactRaw);
 
-            await chatbotController.emit({
-              instance: { instanceName: this.instance.name, instanceId: this.instanceId },
-              remoteJid: (messageRaw.key as any).remoteJid,
-              msg: messageRaw,
-              pushName: messageRaw.pushName,
-            });
-
-            const contact = await this.prismaRepository.contact.findFirst({
-              where: { remoteJid: received.key.remoteJid, instanceId: this.instanceId },
-            });
-
-            const contactRaw: {
-              remoteJid: string;
-              pushName: string;
-              profilePicUrl?: string;
-              instanceId: string;
-            } = {
-              remoteJid: received.key.remoteJid,
-              pushName: received.key.fromMe ? '' : received.key.fromMe == null ? '' : received.pushName,
-              profilePicUrl: (await this.profilePicture(received.key.remoteJid)).profilePictureUrl,
-              instanceId: this.instanceId,
-            };
-
-            if (contactRaw.remoteJid === 'status@broadcast') {
-              continue;
+            if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
+              await this.chatwootService.eventWhatsapp(
+                Events.CONTACTS_UPDATE,
+                { instanceName: this.instance.name, instanceId: this.instanceId },
+                contactRaw,
+              );
             }
-
-            if (contactRaw.remoteJid.includes('@s.whatsapp') || contactRaw.remoteJid.includes('@lid')) {
-              await saveOnWhatsappCache([
-                {
-                  remoteJid:
-                    (messageRaw.key as any).addressingMode === 'lid'
-                      ? (messageRaw.key as any).remoteJidAlt
-                      : (messageRaw.key as any).remoteJid,
-                  remoteJidAlt: (messageRaw.key as any).remoteJidAlt,
-                  lid: (messageRaw.key as any).addressingMode === 'lid' ? 'lid' : null,
-                },
-              ]);
-            }
-
-            if (contact) {
-              this.sendDataWebhook(Events.CONTACTS_UPDATE, contactRaw);
-
-              if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
-                await this.chatwootService.eventWhatsapp(
-                  Events.CONTACTS_UPDATE,
-                  { instanceName: this.instance.name, instanceId: this.instanceId },
-                  contactRaw,
-                );
-              }
-
-              if (this.configService.get<Database>('DATABASE').SAVE_DATA.CONTACTS)
-                await this.prismaRepository.contact.upsert({
-                  where: {
-                    remoteJid_instanceId: { remoteJid: contactRaw.remoteJid, instanceId: contactRaw.instanceId },
-                  },
-                  create: contactRaw,
-                  update: contactRaw,
-                });
-
-              continue;
-            }
-
-            this.sendDataWebhook(Events.CONTACTS_UPSERT, contactRaw);
 
             if (this.configService.get<Database>('DATABASE').SAVE_DATA.CONTACTS)
               await this.prismaRepository.contact.upsert({
                 where: { remoteJid_instanceId: { remoteJid: contactRaw.remoteJid, instanceId: contactRaw.instanceId } },
-                update: contactRaw,
                 create: contactRaw,
+                update: contactRaw,
               });
-          } catch (error) {
-            this.logger.error([
-              'Failed to process an upserted message; continuing with the rest of the batch',
-              received?.key?.id,
-              error?.message,
-              error?.stack,
-            ]);
+
+            continue;
           }
+
+          this.sendDataWebhook(Events.CONTACTS_UPSERT, contactRaw);
+
+          if (this.configService.get<Database>('DATABASE').SAVE_DATA.CONTACTS)
+            await this.prismaRepository.contact.upsert({
+              where: { remoteJid_instanceId: { remoteJid: contactRaw.remoteJid, instanceId: contactRaw.instanceId } },
+              update: contactRaw,
+              create: contactRaw,
+            });
         }
       } catch (error) {
         this.logger.error(error);
@@ -1887,18 +1561,7 @@ export class BaileysStartupService extends ChannelStartupService {
       const readChatToUpdate: Record<string, true> = {}; // {remoteJid: true}
 
       for await (const { key, update } of args) {
-        const keyAny = key as any;
-        if (keyAny.remoteJid) {
-          keyAny.remoteJid = keyAny.remoteJid.replace(/:.*$/, '');
-        }
-        if (keyAny.participant) {
-          keyAny.participant = keyAny.participant.replace(/:.*$/, '');
-        }
-
-        const normalizedRemoteJid = keyAny.remoteJid;
-        const normalizedParticipant = keyAny.participant;
-
-        if (settings?.groupsIgnore && normalizedRemoteJid?.includes('@g.us')) {
+        if (settings?.groupsIgnore && key.remoteJid?.includes('@g.us')) {
           continue;
         }
 
@@ -1949,9 +1612,9 @@ export class BaileysStartupService extends ChannelStartupService {
 
           const message: any = {
             keyId: key.id,
-            remoteJid: normalizedRemoteJid,
+            remoteJid: key?.remoteJid,
             fromMe: key.fromMe,
-            participant: normalizedParticipant,
+            participant: key?.participant,
             status: status[update.status] ?? 'SERVER_ACK',
             pollUpdates,
             instanceId: this.instanceId,
@@ -1973,44 +1636,18 @@ export class BaileysStartupService extends ChannelStartupService {
             }
 
             const searchId = originalMessageId || key.id;
-            const dbProvider = this.configService.get<Database>('DATABASE').PROVIDER;
 
-            let messages: any[];
-            if (dbProvider === 'mysql') {
-              messages = (await this.prismaRepository.$queryRaw`
-                SELECT * FROM Message
-                WHERE instanceId = ${this.instanceId}
-                AND JSON_UNQUOTE(JSON_EXTRACT(\`key\`, '$.id')) = ${searchId}
-                LIMIT 1
-              `) as any[];
-            } else {
-              messages = (await this.prismaRepository.$queryRaw`
-                SELECT * FROM "Message"
-                WHERE "instanceId" = ${this.instanceId}
-                AND "key"->>'id' = ${searchId}
-                LIMIT 1
-              `) as any[];
-            }
+            const messages = (await this.prismaRepository.$queryRaw`
+              SELECT * FROM "Message"
+              WHERE "instanceId" = ${this.instanceId}
+              AND "key"->>'id' = ${searchId}
+              LIMIT 1
+            `) as any[];
             findMessage = messages[0] || null;
 
             if (!findMessage?.id) {
-              this.logger.verbose(
-                `Original message not found for update. Skipping. This is expected for protocol messages or ephemeral events not saved to the database. Key: ${JSON.stringify(key)}`,
-              );
+              this.logger.warn(`Original message not found for update. Skipping. Key: ${JSON.stringify(key)}`);
               continue;
-            }
-
-            // Sync the incoming key.remoteJid with the stored one.
-            // This mutation is safe and necessary because Baileys events might use LIDs while we store Phone JIDs (or vice versa).
-            // Normalizing ensuring downstream logic uses the identifier that exists in our database.
-            if (findMessage?.key?.remoteJid && key.remoteJid !== findMessage.key.remoteJid) {
-              key.remoteJid = findMessage.key.remoteJid;
-            }
-            if (findMessage?.key?.remoteJid && findMessage.key.remoteJid !== key.remoteJid) {
-              this.logger.verbose(
-                `Updating key.remoteJid from ${key.remoteJid} to ${findMessage.key.remoteJid} based on stored message`,
-              );
-              key.remoteJid = findMessage.key.remoteJid;
             }
             message.messageId = findMessage.id;
           }
@@ -2417,22 +2054,6 @@ export class BaileysStartupService extends ChannelStartupService {
     }
   }
 
-  public async getLid(number: string) {
-    const jid = createJid(number);
-
-    if (!this.client?.signalRepository) {
-      return { wuid: jid, lid: null };
-    }
-
-    try {
-      const lid = await this.client.signalRepository.lidMapping.getLIDForPN(jid);
-      return { wuid: jid, lid: lid || null };
-    } catch (error) {
-      console.error(`Failed to fetch LID for ${jid}:`, error);
-      return { wuid: jid, lid: null };
-    }
-  }
-
   public async getStatus(number: string) {
     const jid = createJid(number);
 
@@ -2505,51 +2126,6 @@ export class BaileysStartupService extends ChannelStartupService {
       return error;
     }
   }
-  public generateMessageID() {
-    return {
-      id: generateMessageIDV2(this.client.user?.id),
-    };
-  }
-
-  private async generateLinkPreview(text: string) {
-    try {
-      const linkRegex = /https?:\/\/[^\s]+/;
-      const match = text.match(linkRegex);
-
-      if (!match) return undefined;
-
-      // Trim common trailing punctuation that may follow URLs in natural text
-      const url = match[0].replace(/[.,);\]]+$/u, '');
-      if (!url) return undefined;
-
-      const previewData = (await getLinkPreview(url, {
-        imagesPropertyType: 'og', // fetches only open-graph images
-        headers: {
-          'user-agent': 'googlebot', // fetches with googlebot to prevent login pages
-        },
-      })) as any;
-
-      if (!previewData || !previewData.title) return undefined;
-
-      const image = previewData.images && previewData.images.length > 0 ? previewData.images[0] : undefined;
-
-      return {
-        externalAdReply: {
-          title: previewData.title,
-          body: previewData.description,
-          mediaType: 2, // 2 for video/image preview, though usually 1 is for thumbnail
-          thumbnailUrl: image,
-          sourceUrl: url,
-          mediaUrl: url,
-          renderLargerThumbnail: true,
-          // showAdAttribution: true // Removed to prevent "Sent via ad" label
-        },
-      };
-    } catch (error) {
-      this.logger.error(`Error generating link preview: ${error}`);
-      return undefined;
-    }
-  }
 
   private async sendMessage(
     sender: string,
@@ -2560,7 +2136,6 @@ export class BaileysStartupService extends ChannelStartupService {
     messageId?: string,
     ephemeralExpiration?: number,
     contextInfo?: any,
-    additionalNodes?: BinaryNode[],
     // participants?: GroupParticipant[],
   ) {
     sender = sender.toLowerCase();
@@ -2580,17 +2155,14 @@ export class BaileysStartupService extends ChannelStartupService {
     // NOTE: NÃO DEVEMOS GERAR O messageId AQUI, SOMENTE SE VIER INFORMADO POR PARAMETRO. A GERAÇÃO ANTERIOR IMPEDE O WZAP DE IDENTIFICAR A SOURCE.
     if (messageId) option.messageId = messageId;
 
-    if (message['viewOnceMessage'] || message['interactiveMessage'] || message['listMessage']) {
+    if (message['viewOnceMessage']) {
       const m = generateWAMessageFromContent(sender, message, {
         timestamp: new Date(),
         userJid: this.instance.wuid,
         messageId,
         quoted,
       });
-      const id = await this.client.relayMessage(sender, message, {
-        messageId,
-        ...(additionalNodes?.length ? { additionalNodes } : {}),
-      });
+      const id = await this.client.relayMessage(sender, message, { messageId });
       m.key = { id: id, remoteJid: sender, participant: isPnUser(sender) ? sender : undefined, fromMe: true };
       for (const [key, value] of Object.entries(m)) {
         if (!value || (isArray(value) && value.length) === 0) {
@@ -2719,11 +2291,10 @@ export class BaileysStartupService extends ChannelStartupService {
     message: T,
     options?: Options,
     isIntegration = false,
-    additionalNodes?: BinaryNode[],
   ) {
     const isWA = (await this.whatsappNumber({ numbers: [number] }))?.shift();
 
-    if (!isWA.exists && !isJidGroup(isWA.jid) && !isWA.jid.includes('@broadcast') && !isWA.jid.includes('@lid')) {
+    if (!isWA.exists && !isJidGroup(isWA.jid) && !isWA.jid.includes('@broadcast')) {
       throw new BadRequestException(isWA);
     }
 
@@ -2767,12 +2338,7 @@ export class BaileysStartupService extends ChannelStartupService {
         }
       }
 
-      const linkPreview = options?.linkPreview === false ? false : undefined;
-
-      let previewContext: any = undefined;
-      if (linkPreview !== false && (message as any)?.conversation) {
-        previewContext = await this.generateLinkPreview((message as any).conversation);
-      }
+      const linkPreview = options?.linkPreview != false ? undefined : false;
 
       let quoted: WAMessage;
 
@@ -2806,7 +2372,7 @@ export class BaileysStartupService extends ChannelStartupService {
           throw new NotFoundException('Group not found');
         }
 
-        if (options?.mentionsEveryOne === true) {
+        if (options?.mentionsEveryOne) {
           mentions = group.participants.map((participant) => participant.id);
         } else if (options?.mentioned?.length) {
           mentions = options.mentioned.map((mention) => {
@@ -2824,10 +2390,8 @@ export class BaileysStartupService extends ChannelStartupService {
           mentions,
           linkPreview,
           quoted,
-          options?.messageId ?? null,
+          null,
           group?.ephemeralDuration,
-          previewContext,
-          additionalNodes,
           // group?.participants,
         );
       } else {
@@ -2841,7 +2405,6 @@ export class BaileysStartupService extends ChannelStartupService {
             unsigned: false,
           },
           disappearingMode: { initiator: 0 },
-          ...previewContext,
         };
         messageSent = await this.sendMessage(
           sender,
@@ -2849,10 +2412,9 @@ export class BaileysStartupService extends ChannelStartupService {
           mentions,
           linkPreview,
           quoted,
-          options?.messageId ?? null,
+          null,
           undefined,
           contextInfo,
-          additionalNodes,
         );
       }
 
@@ -2860,7 +2422,7 @@ export class BaileysStartupService extends ChannelStartupService {
         messageSent.messageTimestamp = messageSent.messageTimestamp?.toNumber();
       }
 
-      const messageRaw = this.prepareMessage(messageSent) as any;
+      const messageRaw = this.prepareMessage(messageSent);
 
       const isMedia =
         messageSent?.message?.imageMessage ||
@@ -2882,15 +2444,14 @@ export class BaileysStartupService extends ChannelStartupService {
         );
       }
 
-      if (this.configService.get<Openai>('OPENAI').ENABLED && (messageRaw as any)?.message?.audioMessage) {
+      if (this.configService.get<Openai>('OPENAI').ENABLED && messageRaw?.message?.audioMessage) {
         const openAiDefaultSettings = await this.prismaRepository.openaiSetting.findFirst({
           where: { instanceId: this.instanceId },
           include: { OpenaiCreds: true },
         });
 
         if (openAiDefaultSettings && openAiDefaultSettings.openaiCredsId && openAiDefaultSettings.speechToText) {
-          (messageRaw.message as any).speechToText =
-            `[audio] ${await this.openaiService.speechToText(messageRaw, this)}`;
+          messageRaw.message.speechToText = `[audio] ${await this.openaiService.speechToText(messageRaw, this)}`;
         }
       }
 
@@ -3007,7 +2568,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
       const isWA = (await this.whatsappNumber({ numbers: [number] }))?.shift();
 
-      if (!isWA.exists && !isJidGroup(isWA.jid) && !isWA.jid.includes('@broadcast') && !isWA.jid.includes('@lid')) {
+      if (!isWA.exists && !isJidGroup(isWA.jid) && !isWA.jid.includes('@broadcast')) {
         throw new BadRequestException(isWA);
       }
 
@@ -3082,7 +2643,6 @@ export class BaileysStartupService extends ChannelStartupService {
         linkPreview: data?.linkPreview,
         mentionsEveryOne: data?.mentionsEveryOne,
         mentioned: data?.mentioned,
-        messageId: data?.messageId,
       },
       isIntegration,
     );
@@ -3099,7 +2659,6 @@ export class BaileysStartupService extends ChannelStartupService {
         linkPreview: data?.linkPreview,
         mentionsEveryOne: data?.mentionsEveryOne,
         mentioned: data?.mentioned,
-        messageId: data?.messageId,
       },
     );
   }
@@ -3270,7 +2829,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
           const response = await axios.get(mediaMessage.media, config);
 
-          mimetype = String(response.headers['content-type']);
+          mimetype = response.headers['content-type'];
         }
       }
 
@@ -3320,14 +2879,7 @@ export class BaileysStartupService extends ChannelStartupService {
       prepareMedia[mediaType].fileName = mediaMessage.fileName;
 
       if (mediaMessage.mediatype === 'video') {
-        prepareMedia[mediaType].gifPlayback = mediaMessage.gifPlayback === true || mediaMessage.gifPlayback === 'true';
-
-        if (mediaMessage.gifAttribution !== undefined) {
-          const gifAttribution = Number(mediaMessage.gifAttribution);
-          if (gifAttribution === 0 || gifAttribution === 1 || gifAttribution === 2) {
-            prepareMedia[mediaType].gifAttribution = gifAttribution;
-          }
-        }
+        prepareMedia[mediaType].gifPlayback = false;
       }
 
       return generateWAMessageFromContent(
@@ -3381,7 +2933,7 @@ export class BaileysStartupService extends ChannelStartupService {
         return await sharp(imageBuffer).webp().toBuffer();
       }
     } catch (error) {
-      console.error('Error converting image to WebP:', error);
+      console.error('Erro ao converter a imagem para WebP:', error);
       throw error;
     }
   }
@@ -3420,7 +2972,6 @@ export class BaileysStartupService extends ChannelStartupService {
         quoted: data?.quoted,
         mentionsEveryOne: data?.mentionsEveryOne,
         mentioned: data?.mentioned,
-        messageId: data?.messageId,
       },
     );
 
@@ -3443,7 +2994,6 @@ export class BaileysStartupService extends ChannelStartupService {
         quoted: data?.quoted,
         mentionsEveryOne: data?.mentionsEveryOne,
         mentioned: data?.mentioned,
-        messageId: data?.messageId,
       },
       isIntegration,
     );
@@ -3460,7 +3010,6 @@ export class BaileysStartupService extends ChannelStartupService {
       quoted: data?.quoted,
       mentionsEveryOne: data?.mentionsEveryOne,
       mentioned: data?.mentioned,
-      messageId: data?.messageId,
     };
 
     if (file) mediaData.media = file.buffer.toString('base64');
@@ -3476,7 +3025,6 @@ export class BaileysStartupService extends ChannelStartupService {
         quoted: data?.quoted,
         mentionsEveryOne: data?.mentionsEveryOne,
         mentioned: data?.mentioned,
-        messageId: data?.messageId,
       },
       isIntegration,
     );
@@ -3623,7 +3171,7 @@ export class BaileysStartupService extends ChannelStartupService {
           .noVideo()
           .audioCodec('libopus')
           .addOutputOptions('-avoid_negative_ts make_zero')
-          .audioBitrate('48k')
+          .audioBitrate('128k')
           .audioFrequency(48000)
           .audioChannels(1)
           .outputOptions([
@@ -3655,58 +3203,6 @@ export class BaileysStartupService extends ChannelStartupService {
     }
   }
 
-  private async getAudioMetadata(audioBuffer: Buffer): Promise<{ seconds: number; waveform: Uint8Array }> {
-    try {
-      this.logger.debug('Decoding audio buffer for metadata extraction...');
-      const audioData = await audioDecode(audioBuffer);
-
-      // Extract duration
-      const seconds = Math.ceil(audioData.duration);
-      this.logger.debug(`Audio duration: ${seconds} seconds`);
-
-      // Generate waveform
-      const samples = audioData.getChannelData(0);
-      const waveformLength = 64;
-      const samplesPerWaveform = Math.max(1, Math.floor(samples.length / waveformLength));
-
-      // First pass: calculate raw averages
-      const rawValues: number[] = [];
-      for (let i = 0; i < waveformLength; i++) {
-        const start = i * samplesPerWaveform;
-        const end = start + samplesPerWaveform;
-        let sum = 0;
-        for (let j = start; j < end && j < samples.length; j++) {
-          sum += Math.abs(samples[j]);
-        }
-        const avg = sum / samplesPerWaveform;
-        rawValues.push(avg);
-      }
-
-      // Find max value for normalization
-      const maxValue = Math.max(...rawValues);
-
-      // Second pass: normalize to 0-100 range
-      const waveform = new Uint8Array(waveformLength);
-      if (maxValue > 0) {
-        for (let i = 0; i < waveformLength; i++) {
-          const normalized = Math.floor((rawValues[i] / maxValue) * 100);
-          waveform[i] = rawValues[i] > 0 ? Math.max(5, Math.min(100, normalized)) : 0;
-        }
-      } else {
-        waveform.fill(50);
-      }
-
-      this.logger.debug(`Generated waveform with ${waveform.length} values`);
-
-      return { seconds, waveform };
-    } catch (error) {
-      this.logger.warn(`Failed to extract audio metadata: ${error.message}, using defaults`);
-      const defaultWaveform = new Uint8Array(64);
-      defaultWaveform.fill(50);
-      return { seconds: 1, waveform: defaultWaveform };
-    }
-  }
-
   public async audioWhatsapp(data: SendAudioDto, file?: any, isIntegration = false) {
     const mediaData: SendAudioDto = { ...data };
 
@@ -3725,14 +3221,10 @@ export class BaileysStartupService extends ChannelStartupService {
       const convert = await this.processAudio(mediaData.audio);
 
       if (Buffer.isBuffer(convert)) {
-        const { seconds, waveform } = await this.getAudioMetadata(convert);
-
-        const messageContent = { audio: convert, ptt: true, mimetype: 'audio/ogg; codecs=opus', seconds, waveform };
-
         const result = this.sendMessageWithTyping<AnyMessageContent>(
           data.number,
-          messageContent as any,
-          { presence: 'recording', delay: data?.delay, quoted: data?.quoted },
+          { audio: convert, ptt: true, mimetype: 'audio/ogg; codecs=opus' },
+          { presence: 'recording', delay: data?.delay },
           isIntegration,
         );
 
@@ -3742,23 +3234,14 @@ export class BaileysStartupService extends ChannelStartupService {
       }
     }
 
-    const audioBuffer = isURL(data.audio) ? { url: data.audio } : Buffer.from(data.audio, 'base64');
-    let metadata: { seconds: number; waveform: Uint8Array } | undefined;
-
-    // Only generate waveform for buffers, not URLs
-    if (Buffer.isBuffer(audioBuffer)) {
-      metadata = await this.getAudioMetadata(audioBuffer);
-    }
-
     return await this.sendMessageWithTyping<AnyMessageContent>(
       data.number,
       {
-        audio: audioBuffer,
+        audio: isURL(data.audio) ? { url: data.audio } : Buffer.from(data.audio, 'base64'),
         ptt: true,
         mimetype: 'audio/ogg; codecs=opus',
-        ...(metadata && { seconds: metadata.seconds, waveform: metadata.waveform }),
       },
-      { presence: 'recording', delay: data?.delay, quoted: data?.quoted },
+      { presence: 'recording', delay: data?.delay },
       isIntegration,
     );
   }
@@ -3806,16 +3289,6 @@ export class BaileysStartupService extends ChannelStartupService {
           ],
           share_payment_status: false,
         }),
-      flow: () =>
-        toString({
-          flow_message_version: button.flowMessageVersion ?? '3',
-          flow_token: button.flowToken ?? this.generateRandomId(),
-          flow_id: button.flowId,
-          flow_cta: button.flowCta ?? button.displayText,
-          flow_action: button.flowAction ?? 'navigate',
-          ...(button.flowActionPayload ? { flow_action_payload: button.flowActionPayload } : {}),
-          mode: button.flowMode ?? 'published',
-        }),
     };
 
     return json[button.type]?.() || '';
@@ -3827,7 +3300,6 @@ export class BaileysStartupService extends ChannelStartupService {
     ['url', 'cta_url'],
     ['call', 'cta_call'],
     ['pix', 'payment_info'],
-    ['flow', 'galaxy_message'],
   ]);
 
   private readonly mapKeyType = new Map<KeyType, string>([
@@ -3839,205 +3311,105 @@ export class BaileysStartupService extends ChannelStartupService {
   ]);
 
   public async buttonMessage(data: SendButtonsDto) {
-    if (!data.buttons || data.buttons.length === 0) {
+    if (data.buttons.length === 0) {
       throw new BadRequestException('At least one button is required');
     }
 
-    const replyCount = data.buttons.filter((btn) => btn.type === 'reply').length;
-    const ctaCount = data.buttons.filter(
-      (btn) => btn.type === 'url' || btn.type === 'call' || btn.type === 'copy',
-    ).length;
-    const hasReplyButtons = replyCount > 0;
+    const hasReplyButtons = data.buttons.some((btn) => btn.type === 'reply');
+
     const hasPixButton = data.buttons.some((btn) => btn.type === 'pix');
-    const hasFlowButton = data.buttons.some((btn) => btn.type === 'flow');
-    const hasCTAButtons = ctaCount > 0;
 
-    /* =========================
-     * REGRAS DE VALIDAÇÃO
-     *
-     * WhatsApp's native_flow with name="mixed" (see buildInteractiveBizNode)
-     * renders quick_reply + cta_url + cta_call + cta_copy together. PIX
-     * (`payment_info`) and Flows (`galaxy_message`) use their own templates
-     * and must travel alone.
-     * ========================= */
+    const hasOtherButtons = data.buttons.some((btn) => btn.type !== 'reply' && btn.type !== 'pix');
 
-    // WhatsApp Flows (galaxy_message) — renders its own interactive form and
-    // must be the only button in the message.
-    if (hasFlowButton) {
-      if (data.buttons.length > 1) {
-        throw new BadRequestException('Only one flow button is allowed');
+    if (hasReplyButtons) {
+      if (data.buttons.length > 3) {
+        throw new BadRequestException('Maximum of 3 reply buttons allowed');
       }
-      if (hasReplyButtons || hasCTAButtons || hasPixButton) {
-        throw new BadRequestException('Flow button cannot be mixed with other button types');
+      if (hasOtherButtons) {
+        throw new BadRequestException('Reply buttons cannot be mixed with other button types');
       }
-
-      const flowButton = data.buttons[0];
-      if (!flowButton.flowId) {
-        throw new BadRequestException('flowId is required for a flow button');
-      }
-
-      const message: proto.IMessage = {
-        interactiveMessage: {
-          body: {
-            text: (() => {
-              let text = `*${data.title}*`;
-              if (data?.description) {
-                text += `\n\n${data.description}`;
-              }
-              return text;
-            })(),
-          },
-          footer: data?.footer ? { text: data.footer } : undefined,
-          nativeFlowMessage: {
-            buttons: [
-              {
-                name: this.mapType.get('flow'),
-                buttonParamsJson: this.toJSONString(flowButton),
-              },
-            ],
-            messageParamsJson: JSON.stringify({
-              from: 'api',
-              templateId: v4(),
-            }),
-          },
-        },
-      };
-
-      return await this.sendMessageWithTyping(
-        data.number,
-        message,
-        {
-          delay: data?.delay,
-          presence: 'composing',
-          quoted: data?.quoted,
-          mentionsEveryOne: data?.mentionsEveryOne,
-          mentioned: data?.mentioned,
-        },
-        false,
-        [buildInteractiveBizNode()],
-      );
     }
 
-    // Per-type ceilings on a mixed message — keep within WhatsApp's
-    // rendered limits (quick_reply ≤ 3, CTA ≤ 2) and cap the total so the
-    // UI doesn't truncate.
-    if (replyCount > 3) {
-      throw new BadRequestException('Maximum of 3 reply buttons allowed');
-    }
-    if (ctaCount > 2) {
-      throw new BadRequestException('Maximum of 2 CTA buttons allowed (url/call/copy)');
-    }
-    if (replyCount + ctaCount > 5) {
-      throw new BadRequestException('Maximum of 5 buttons allowed in a single message');
-    }
-
-    // PIX
     if (hasPixButton) {
       if (data.buttons.length > 1) {
         throw new BadRequestException('Only one PIX button is allowed');
       }
-      if (hasReplyButtons || hasCTAButtons) {
+      if (hasOtherButtons) {
         throw new BadRequestException('PIX button cannot be mixed with other button types');
       }
 
       const message: proto.IMessage = {
-        interactiveMessage: {
-          nativeFlowMessage: {
-            buttons: [
-              {
-                name: this.mapType.get('pix'),
-                buttonParamsJson: this.toJSONString(data.buttons[0]),
+        viewOnceMessage: {
+          message: {
+            interactiveMessage: {
+              nativeFlowMessage: {
+                buttons: [{ name: this.mapType.get('pix'), buttonParamsJson: this.toJSONString(data.buttons[0]) }],
+                messageParamsJson: JSON.stringify({ from: 'api', templateId: v4() }),
               },
-            ],
-            messageParamsJson: JSON.stringify({
-              from: 'api',
-              templateId: v4(),
-            }),
+            },
           },
         },
       };
 
-      return await this.sendMessageWithTyping(
-        data.number,
-        message,
-        {
-          delay: data?.delay,
-          presence: 'composing',
-          quoted: data?.quoted,
-          mentionsEveryOne: data?.mentionsEveryOne,
-          mentioned: data?.mentioned,
-        },
-        false,
-        [buildInteractiveBizNode()],
-      );
-    }
-
-    // CTA / mixed validation is handled in the per-type ceilings above; no
-    // additional restriction here so reply + CTA can ship in the same
-    // native_flow `mixed` message.
-
-    /* =========================
-     * HEADER (opcional)
-     * ========================= */
-
-    const generatedMedia = data?.thumbnailUrl
-      ? await this.prepareMediaMessage({ mediatype: 'image', media: data.thumbnailUrl })
-      : null;
-
-    /* =========================
-     * BOTÕES
-     * ========================= */
-
-    const buttons = data.buttons.map((btn) => ({
-      name: this.mapType.get(btn.type),
-      buttonParamsJson: this.toJSONString(btn),
-    }));
-
-    /* =========================
-     * MENSAGEM FINAL
-     * ========================= */
-
-    const message: proto.IMessage = {
-      interactiveMessage: {
-        body: {
-          text: (() => {
-            let text = `*${data.title}*`;
-            if (data?.description) {
-              text += `\n\n${data.description}`;
-            }
-            return text;
-          })(),
-        },
-        footer: data?.footer ? { text: data.footer } : undefined,
-        header: generatedMedia?.message?.imageMessage
-          ? {
-              hasMediaAttachment: true,
-              imageMessage: generatedMedia.message.imageMessage,
-            }
-          : undefined,
-        nativeFlowMessage: {
-          buttons,
-          messageParamsJson: JSON.stringify({
-            from: 'api',
-            templateId: v4(),
-          }),
-        },
-      },
-    };
-
-    return await this.sendMessageWithTyping(
-      data.number,
-      message,
-      {
+      return await this.sendMessageWithTyping(data.number, message, {
         delay: data?.delay,
         presence: 'composing',
         quoted: data?.quoted,
         mentionsEveryOne: data?.mentionsEveryOne,
         mentioned: data?.mentioned,
+      });
+    }
+
+    const generate = await (async () => {
+      if (data?.thumbnailUrl) {
+        return await this.prepareMediaMessage({ mediatype: 'image', media: data.thumbnailUrl });
+      }
+    })();
+
+    const buttons = data.buttons.map((value) => {
+      return { name: this.mapType.get(value.type), buttonParamsJson: this.toJSONString(value) };
+    });
+
+    const message: proto.IMessage = {
+      viewOnceMessage: {
+        message: {
+          interactiveMessage: {
+            body: {
+              text: (() => {
+                let t = '*' + data.title + '*';
+                if (data?.description) {
+                  t += '\n\n';
+                  t += data.description;
+                  t += '\n';
+                }
+                return t;
+              })(),
+            },
+            footer: { text: data?.footer },
+            header: (() => {
+              if (generate?.message?.imageMessage) {
+                return {
+                  hasMediaAttachment: !!generate.message.imageMessage,
+                  imageMessage: generate.message.imageMessage,
+                };
+              }
+            })(),
+            nativeFlowMessage: {
+              buttons: buttons,
+              messageParamsJson: JSON.stringify({ from: 'api', templateId: v4() }),
+            },
+          },
+        },
       },
-      false,
-      [buildInteractiveBizNode()],
-    );
+    };
+
+    return await this.sendMessageWithTyping(data.number, message, {
+      delay: data?.delay,
+      presence: 'composing',
+      quoted: data?.quoted,
+      mentionsEveryOne: data?.mentionsEveryOne,
+      mentioned: data?.mentioned,
+    });
   }
 
   public async locationMessage(data: SendLocationDto) {
@@ -4062,115 +3434,18 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   public async listMessage(data: SendListDto) {
-    // Formato LEGADO (`listMessage` com listType SINGLE_SELECT) — funciona em Web, iOS e Android.
-    // O formato moderno (interactiveMessage + nativeFlowMessage com single_select) só renderiza
-    // em mobile recente; no WhatsApp Web/Desktop a mensagem chega vazia.
-    const message: proto.IMessage = {
-      listMessage: {
-        title: data.title || '',
-        description: data.description || '',
-        buttonText: data.buttonText || 'Ver Menu',
-        footerText: data.footerText || '',
-        listType: proto.Message.ListMessage.ListType.SINGLE_SELECT,
-        sections: (data.sections || []).map((section) => ({
-          title: section.title || '',
-          rows: (section.rows || []).map((row) => ({
-            title: row.title || '',
-            description: row.description || '',
-            rowId: row.rowId || '',
-          })),
-        })),
-      },
-    };
-
     return await this.sendMessageWithTyping(
       data.number,
-      message,
       {
-        delay: data?.delay,
-        presence: 'composing',
-        quoted: data?.quoted,
-        mentionsEveryOne: data?.mentionsEveryOne,
-        mentioned: data?.mentioned,
-      },
-      false,
-      [buildListBizNode()],
-    );
-  }
-
-  public async carouselMessage(data: SendCarouselDto) {
-    if (!data.cards?.length) {
-      throw new BadRequestException('At least one card is required');
-    }
-    if (data.cards.length > 10) {
-      throw new BadRequestException('Maximum of 10 cards allowed');
-    }
-
-    for (const card of data.cards) {
-      if (!card.buttons?.length) {
-        throw new BadRequestException('Each card must have at least one button');
-      }
-      if (card.buttons.length > 3) {
-        throw new BadRequestException('Maximum of 3 buttons per card');
-      }
-      if (card.buttons.some((b) => b.type === 'pix')) {
-        throw new BadRequestException('PIX buttons are not supported in carousel');
-      }
-    }
-
-    const buildCardButtons = (card: CarouselCard) =>
-      card.buttons.map((btn) =>
-        toNativeFlowButton(btn, {
-          generateRandomId: this.generateRandomId.bind(this),
-          mapKeyType: this.mapKeyType,
-        }),
-      );
-
-    // Otimização iOS: 1 card sem imagem → nativeFlowMessage direto (sem carouselMessage wrapper)
-    const isSingleNoImage = data.cards.length === 1 && !data.cards[0].imageUrl;
-
-    let interactiveMessage: proto.Message.IInteractiveMessage;
-
-    if (isSingleNoImage) {
-      const card = data.cards[0];
-      interactiveMessage = {
-        body: { text: card.body },
-        footer: card.footer ? { text: card.footer } : undefined,
-        nativeFlowMessage: {
-          buttons: buildCardButtons(card),
-          messageParamsJson: JSON.stringify({ from: 'api', templateId: v4() }),
+        listMessage: {
+          title: data.title,
+          description: data.description,
+          buttonText: data?.buttonText,
+          footerText: data?.footerText,
+          sections: data.sections,
+          listType: 2,
         },
-      };
-    } else {
-      const cards = await Promise.all(
-        data.cards.map(async (card) => {
-          let header: proto.Message.InteractiveMessage.IHeader | undefined;
-          if (card.imageUrl) {
-            const prepared = await this.prepareMediaMessage({ mediatype: 'image', media: card.imageUrl });
-            if (prepared?.message?.imageMessage) {
-              header = { hasMediaAttachment: true, imageMessage: prepared.message.imageMessage };
-            }
-          }
-          return {
-            header,
-            body: { text: card.body },
-            footer: card.footer ? { text: card.footer } : undefined,
-            nativeFlowMessage: { buttons: buildCardButtons(card) },
-          } as proto.Message.IInteractiveMessage;
-        }),
-      );
-
-      interactiveMessage = {
-        body: { text: data.body },
-        carouselMessage: { cards, messageVersion: 1 },
-      };
-    }
-
-    const message: proto.IMessage = { interactiveMessage };
-
-    return await this.sendMessageWithTyping(
-      data.number,
-      message,
+      },
       {
         delay: data?.delay,
         presence: 'composing',
@@ -4178,8 +3453,6 @@ export class BaileysStartupService extends ChannelStartupService {
         mentionsEveryOne: data?.mentionsEveryOne,
         mentioned: data?.mentioned,
       },
-      false,
-      [buildInteractiveBizNode()],
     );
   }
 
@@ -4238,23 +3511,8 @@ export class BaileysStartupService extends ChannelStartupService {
       users: { number: string; jid: string; name?: string }[];
     } = { groups: [], broadcast: [], users: [] };
 
-    const onWhatsapp: OnWhatsAppDto[] = [];
-
     data.numbers.forEach((number) => {
       const jid = createJid(number);
-
-      if (isJidNewsletter(jid)) {
-        onWhatsapp.push(
-          new OnWhatsAppDto(
-            jid,
-            true, // Newsletters are always valid
-            number,
-            undefined, // Can be fetched later if needed
-            'newsletter', // Indicate it's a newsletter type
-          ),
-        );
-        return;
-      }
 
       if (isJidGroup(jid)) {
         jids.groups.push({ number, jid });
@@ -4264,6 +3522,8 @@ export class BaileysStartupService extends ChannelStartupService {
         jids.users.push({ number, jid });
       }
     });
+
+    const onWhatsapp: OnWhatsAppDto[] = [];
 
     // BROADCAST
     onWhatsapp.push(...jids.broadcast.map(({ jid, number }) => new OnWhatsAppDto(jid, false, number)));
@@ -4401,7 +3661,7 @@ export class BaileysStartupService extends ChannelStartupService {
     });
 
     if (numbersToCache.length > 0) {
-      this.logger.verbose(`Caching ${numbersToCache.length} numbers`);
+      this.logger.verbose(`Salvando ${numbersToCache.length} números no cache`);
       await saveOnWhatsappCache(
         numbersToCache.map((user) => ({
           remoteJid: user.jid,
@@ -4417,7 +3677,7 @@ export class BaileysStartupService extends ChannelStartupService {
     try {
       const keys: proto.IMessageKey[] = [];
       data.readMessages.forEach((read) => {
-        if (!isJidBroadcast(read.remoteJid) && !isJidNewsletter(read.remoteJid)) {
+        if (isJidGroup(read.remoteJid) || isPnUser(read.remoteJid)) {
           keys.push({ remoteJid: read.remoteJid, fromMe: read.fromMe, id: read.id });
         }
       });
@@ -4428,26 +3688,8 @@ export class BaileysStartupService extends ChannelStartupService {
     }
   }
 
-  public async markMessageAsPlayed(data: MarkMessageAsPlayedDto) {
-    try {
-      const keys: proto.IMessageKey[] = [];
-      data.playedMessages.forEach((played) => {
-        if (isJidGroup(played.remoteJid) || isPnUser(played.remoteJid)) {
-          keys.push({ remoteJid: played.remoteJid, fromMe: played.fromMe, id: played.id });
-        }
-      });
-      // Baileys exposes sendReceipts(keys, type) where type='played' triggers the
-      // PLAYED ack (blue microphone). Used when an agent plays back an audio
-      // message received from a contact, mirroring the contact's view in WhatsApp.
-      await this.client.sendReceipts(keys, 'played');
-      return { message: 'Played messages', played: 'success' };
-    } catch (error) {
-      throw new InternalServerErrorException('Mark messages as played fail', error.toString());
-    }
-  }
-
   public async getLastMessage(number: string) {
-    const where: any = { key: { path: ['remoteJid'], equals: number }, instanceId: this.instanceId };
+    const where: any = { key: { remoteJid: number }, instanceId: this.instance.id };
 
     const messages = await this.prismaRepository.message.findMany({
       where,
@@ -4524,87 +3766,6 @@ export class BaileysStartupService extends ChannelStartupService {
         message: ['An error occurred while marked unread the chat. Open a calling.', error.toString()],
       });
     }
-  }
-
-  /**
-   * Delete for me: an app-state change on this account only. The recipient's copy is untouched,
-   * which is what separates this from deleteMessage below, a revoke that reaches their phone.
-   *
-   * The stored row outlives the call by STORED_MESSAGE_PURGE_DELAY_MS on purpose. A recipient device
-   * that failed to decrypt asks us to resend, and Baileys answers that retry from this row, so
-   * dropping it at send time would turn a slow device into a "waiting for this message" bubble. A
-   * restart loses the timer; clearChatForMe removes whatever is left.
-   */
-  public async deleteMessageForMe(data: DeleteMessageForMeDto) {
-    const stored = (await this.getMessage({ id: data.id }, true)) as proto.IWebMessageInfo & {
-      messageTimestamp?: number;
-    };
-    const key: proto.IMessageKey = stored?.key ?? {
-      id: data.id,
-      remoteJid: data.remoteJid,
-      fromMe: data.fromMe ?? true,
-      ...(data.participant ? { participant: data.participant } : {}),
-    };
-    const timestamp = Number(data.messageTimestamp ?? stored?.messageTimestamp ?? Math.floor(Date.now() / 1000));
-    try {
-      await this.client.chatModify(
-        { deleteForMe: { deleteMedia: true, key, timestamp } },
-        key.remoteJid ?? data.remoteJid,
-      );
-    } catch (error) {
-      throw new InternalServerErrorException('Error while deleting message for me', error?.toString());
-    }
-    setTimeout(() => {
-      this.prismaRepository.message
-        .deleteMany({ where: { instanceId: this.instanceId, key: { path: ['id'], equals: data.id } } })
-        .catch((error) => this.logger.warn(`Could not purge a stored message: ${error?.toString()}`));
-    }, STORED_MESSAGE_PURGE_DELAY_MS).unref();
-    return { deleted: true };
-  }
-
-  /**
-   * Clear one chat from this account up to `beforeTimestamp`, then drop the stored rows up to the
-   * same instant. Newer messages stay: they may still be in flight to the webhook. Clearing on
-   * WhatsApp can fail (no app-state key yet, socket down) and the rows still go, so the report says
-   * which half happened. Repeat calls find nothing left and answer `deleted: 0`.
-   */
-  public async clearChatForMe(data: ClearChatForMeDto) {
-    const remoteJid = createJid(data.remoteJid);
-    const before = data.beforeTimestamp ?? Math.floor(Date.now() / 1000);
-    const where = {
-      instanceId: this.instanceId,
-      messageTimestamp: { lte: before },
-      key: { path: ['remoteJid'], equals: remoteJid },
-    };
-    // Watchman rows parked as `failed` keep their payload so an endpoint repair can revive them
-    // (that is why failure itself must not null it). A cleared chat is being forgotten, so drop the
-    // message bodies here. Pending rows are left alone: they are still owed a delivery.
-    try {
-      await this.prismaRepository.messageDelivery.updateMany({
-        where: {
-          instanceName: this.instance.name,
-          remoteJid,
-          messageTimestamp: { lte: before },
-          status: 'failed',
-        },
-        data: { payload: null },
-      });
-    } catch (error) {
-      this.logger.warn(`Could not prune parked watchman payloads: ${error?.toString()}`);
-    }
-    const last = await this.prismaRepository.message.findFirst({ where, orderBy: { messageTimestamp: 'desc' } });
-    if (!last) return { cleared: false, deleted: 0 };
-
-    let cleared = true;
-    try {
-      const lastMessage = { key: last.key as proto.IMessageKey, messageTimestamp: last.messageTimestamp };
-      await this.client.chatModify({ clear: true, lastMessages: [lastMessage] }, remoteJid);
-    } catch (error) {
-      cleared = false;
-      this.logger.warn(`Could not clear a chat on WhatsApp: ${error?.toString()}`);
-    }
-    const { count } = await this.prismaRepository.message.deleteMany({ where });
-    return { cleared, deleted: count };
   }
 
   public async deleteMessage(del: DeleteMessage) {
@@ -5427,15 +4588,6 @@ export class BaileysStartupService extends ChannelStartupService {
     }
   }
 
-  public async updateMemberAddMode(update: GroupUpdateMemberAddModeDto) {
-    try {
-      await this.client.groupMemberAddMode(update.groupJid, update.mode);
-      return { update: 'success', mode: update.mode };
-    } catch (error) {
-      throw new BadRequestException('Error updating member add mode', error.toString());
-    }
-  }
-
   public async toggleEphemeral(update: GroupToggleEphemeralDto) {
     try {
       await this.client.groupToggleEphemeral(update.groupJid, update.expiration);
@@ -5497,93 +4649,26 @@ export class BaileysStartupService extends ChannelStartupService {
     return obj;
   }
 
-  /**
-   * Upload an inbound message's media to S3/MinIO and stamp its mediaUrl.
-   *
-   * Extracted from the messages.upsert loop. The early exits below used to be
-   * `return` statements INSIDE that loop, so skipping one video (S3_SAVE_VIDEO
-   * off) or one media-less message left the whole handler: that message never
-   * reached its webhook, and every later message in the batch was never even
-   * saved. Offline messages arrive as one consolidated batch after a reconnect,
-   * so a single odd attachment silently lost everything sent after it. Here a
-   * `return` means what its comment always said: skip the upload, nothing more.
-   */
-  private async uploadInboundMediaToS3(
-    received: WAMessage,
-    msg: { id: string },
-    messageRaw: any,
-    isVideo: boolean,
-  ): Promise<void> {
-    try {
-      if (isVideo && !this.configService.get<S3>('S3').SAVE_VIDEO) {
-        this.logger.warn('Video upload is disabled. Skipping video upload.');
-        // Skip only the upload; the message is still delivered.
-        return;
-      }
+  private prepareMessage(message: proto.IWebMessageInfo): any {
+    const contentType = getContentType(message.message);
+    const contentMsg = message?.message[contentType] as any;
 
-      const message: any = received;
-
-      // Verificação adicional para garantir que há conteúdo de mídia real
-      const hasRealMedia = this.hasValidMediaContent(message);
-
-      if (!hasRealMedia) {
-        this.logger.warn('Message detected as media but contains no valid media content');
-      } else {
-        const media = await this.getBase64FromMediaMessage({ message }, true);
-
-        if (!media) {
-          this.logger.verbose('No valid media to upload (messageContextInfo only), skipping MinIO');
-          return;
-        }
-
-        const { buffer, mediaType, fileName, size } = media;
-        const mimetype = mimeTypes.lookup(fileName).toString();
-        const fullName = join(`${this.instance.id}`, received.key.remoteJid, mediaType, `${Date.now()}_${fileName}`);
-        await s3Service.uploadFile(fullName, buffer, size.fileLength?.low, { 'Content-Type': mimetype });
-
-        await this.prismaRepository.media.create({
-          data: {
-            messageId: msg.id,
-            instanceId: this.instanceId,
-            type: mediaType,
-            fileName: fullName,
-            mimetype,
-          },
-        });
-
-        const mediaUrl = await s3Service.getObjectUrl(fullName);
-
-        (messageRaw.message as any).mediaUrl = mediaUrl;
-
-        await this.prismaRepository.message.update({ where: { id: msg.id }, data: messageRaw });
-      }
-    } catch (error) {
-      this.logger.error(['Error on upload file to minio', error?.message, error?.stack]);
-    }
-  }
-
-  private prepareMessage(message: WAMessage): Message {
-    const keyAny = message.key as any;
-    const messageRaw: any = {
-      key: {
-        ...message.key,
-        remoteJid: keyAny.remoteJid?.replace(/:.*$/, ''),
-        participant: keyAny.participant?.replace(/:.*$/, ''),
-      },
+    const messageRaw = {
+      key: message.key, // Save key exactly as it comes from Baileys
       pushName:
         message.pushName ||
         (message.key.fromMe
-          ? 'You'
+          ? 'Você'
           : message?.participant || (message.key?.participant ? message.key.participant.split('@')[0] : null)),
+      status: status[message.status],
       message: this.deserializeMessageBuffers({ ...message.message }),
-      messageType: getContentType(message.message),
+      contextInfo: this.deserializeMessageBuffers(contentMsg?.contextInfo),
+      messageType: contentType || 'unknown',
       messageTimestamp: Long.isLong(message.messageTimestamp)
         ? message.messageTimestamp.toNumber()
         : (message.messageTimestamp as number),
-      source: getDevice(keyAny.id),
       instanceId: this.instanceId,
-      status: status[message.status],
-      contextInfo: this.deserializeMessageBuffers(message.message?.messageContextInfo),
+      source: getDevice(message.key.id),
     };
 
     if (!messageRaw.status && message.key.fromMe === false) {
@@ -5613,10 +4698,6 @@ export class BaileysStartupService extends ChannelStartupService {
         quotedMessage.documentMessage = quotedMessage.documentWithCaptionMessage.message.documentMessage;
         delete quotedMessage.documentWithCaptionMessage;
       }
-    }
-
-    if (isJidNewsletter(message.key.remoteJid) && message.key.fromMe) {
-      messageRaw.status = status[3]; // DELIVERED MESSAGE TO NEWSLETTER CHANNEL
     }
 
     return messageRaw;
@@ -5653,32 +4734,16 @@ export class BaileysStartupService extends ChannelStartupService {
   private async updateMessagesReadedByTimestamp(remoteJid: string, timestamp?: number): Promise<number> {
     if (timestamp === undefined || timestamp === null) return 0;
 
-    const provider = this.configService.get<Database>('DATABASE').PROVIDER;
-    let result: number;
-
-    if (provider === 'mysql') {
-      // MySQL version
-      result = await this.prismaRepository.$executeRaw`
-        UPDATE Message
-        SET status = ${status[4]}
-        WHERE instanceId = ${this.instanceId}
-        AND JSON_UNQUOTE(JSON_EXTRACT(\`key\`, '$.remoteJid')) = ${remoteJid}
-        AND JSON_UNQUOTE(JSON_EXTRACT(\`key\`, '$.fromMe')) = 'false'
-        AND messageTimestamp <= ${timestamp}
-        AND (status IS NULL OR status = ${status[3]})
-      `;
-    } else {
-      // PostgreSQL version
-      result = await this.prismaRepository.$executeRaw`
-        UPDATE "Message"
-        SET "status" = ${status[4]}
-        WHERE "instanceId" = ${this.instanceId}
-        AND "key"->>'remoteJid' = ${remoteJid}
-        AND ("key"->>'fromMe')::boolean = false
-        AND "messageTimestamp" <= ${timestamp}
-        AND ("status" IS NULL OR "status" = ${status[3]})
-      `;
-    }
+    // Use raw SQL to avoid JSON path issues
+    const result = await this.prismaRepository.$executeRaw`
+      UPDATE "Message"
+      SET "status" = ${status[4]}
+      WHERE "instanceId" = ${this.instanceId}
+      AND "key"->>'remoteJid' = ${remoteJid}
+      AND ("key"->>'fromMe')::boolean = false
+      AND "messageTimestamp" <= ${timestamp}
+      AND ("status" IS NULL OR "status" = ${status[3]})
+    `;
 
     if (result) {
       if (result > 0) {
@@ -5692,33 +4757,16 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   private async updateChatUnreadMessages(remoteJid: string): Promise<number> {
-    const provider = this.configService.get<Database>('DATABASE').PROVIDER;
-
-    let unreadMessagesPromise: Promise<number>;
-
-    if (provider === 'mysql') {
-      // MySQL version
-      unreadMessagesPromise = this.prismaRepository.$queryRaw`
-        SELECT COUNT(*) as count FROM Message
-        WHERE instanceId = ${this.instanceId}
-        AND JSON_UNQUOTE(JSON_EXTRACT(\`key\`, '$.remoteJid')) = ${remoteJid}
-        AND JSON_UNQUOTE(JSON_EXTRACT(\`key\`, '$.fromMe')) = 'false'
-        AND status = ${status[3]}
-      `.then((result: any[]) => Number(result[0]?.count) || 0);
-    } else {
-      // PostgreSQL version
-      unreadMessagesPromise = this.prismaRepository.$queryRaw`
+    const [chat, unreadMessages] = await Promise.all([
+      this.prismaRepository.chat.findFirst({ where: { remoteJid } }),
+      // Use raw SQL to avoid JSON path issues
+      this.prismaRepository.$queryRaw`
         SELECT COUNT(*)::int as count FROM "Message"
         WHERE "instanceId" = ${this.instanceId}
         AND "key"->>'remoteJid' = ${remoteJid}
         AND ("key"->>'fromMe')::boolean = false
         AND "status" = ${status[3]}
-      `.then((result: any[]) => result[0]?.count || 0);
-    }
-
-    const [chat, unreadMessages] = await Promise.all([
-      this.prismaRepository.chat.findFirst({ where: { remoteJid } }),
-      unreadMessagesPromise,
+      `.then((result: any[]) => result[0]?.count || 0),
     ]);
 
     if (chat && chat.unreadMessages !== unreadMessages) {
@@ -5730,95 +4778,50 @@ export class BaileysStartupService extends ChannelStartupService {
 
   private async addLabel(labelId: string, instanceId: string, chatId: string) {
     const id = cuid();
-    const provider = this.configService.get<Database>('DATABASE').PROVIDER;
 
-    if (provider === 'mysql') {
-      // MySQL version - use INSERT ... ON DUPLICATE KEY UPDATE
-      await this.prismaRepository.$executeRawUnsafe(
-        `INSERT INTO Chat (id, instanceId, remoteJid, labels, createdAt, updatedAt)
-         VALUES (?, ?, ?, JSON_ARRAY(?), NOW(), NOW())
-         ON DUPLICATE KEY UPDATE
-           labels = JSON_ARRAY_APPEND(
-             COALESCE(labels, JSON_ARRAY()),
-             '$',
-             ?
-           ),
-           updatedAt = NOW()`,
-        id,
-        instanceId,
-        chatId,
-        labelId,
-        labelId,
-      );
-    } else {
-      // PostgreSQL version
-      await this.prismaRepository.$executeRawUnsafe(
-        `INSERT INTO "Chat" ("id", "instanceId", "remoteJid", "labels", "createdAt", "updatedAt")
-         VALUES ($4, $2, $3, to_jsonb(ARRAY[$1]::text[]), NOW(), NOW()) ON CONFLICT ("instanceId", "remoteJid")
-       DO
-        UPDATE
-            SET "labels" = (
-            SELECT to_jsonb(array_agg(DISTINCT elem))
-            FROM (
-            SELECT jsonb_array_elements_text("Chat"."labels") AS elem
-            UNION
-            SELECT $1::text AS elem
-            ) sub
-            ),
-            "updatedAt" = NOW();`,
-        labelId,
-        instanceId,
-        chatId,
-        id,
-      );
-    }
+    await this.prismaRepository.$executeRawUnsafe(
+      `INSERT INTO "Chat" ("id", "instanceId", "remoteJid", "labels", "createdAt", "updatedAt")
+       VALUES ($4, $2, $3, to_jsonb(ARRAY[$1]::text[]), NOW(), NOW()) ON CONFLICT ("instanceId", "remoteJid")
+     DO
+      UPDATE
+          SET "labels" = (
+          SELECT to_jsonb(array_agg(DISTINCT elem))
+          FROM (
+          SELECT jsonb_array_elements_text("Chat"."labels") AS elem
+          UNION
+          SELECT $1::text AS elem
+          ) sub
+          ),
+          "updatedAt" = NOW();`,
+      labelId,
+      instanceId,
+      chatId,
+      id,
+    );
   }
 
   private async removeLabel(labelId: string, instanceId: string, chatId: string) {
     const id = cuid();
-    const provider = this.configService.get<Database>('DATABASE').PROVIDER;
 
-    if (provider === 'mysql') {
-      // MySQL version - use INSERT ... ON DUPLICATE KEY UPDATE
-      await this.prismaRepository.$executeRawUnsafe(
-        `INSERT INTO Chat (id, instanceId, remoteJid, labels, createdAt, updatedAt)
-         VALUES (?, ?, ?, JSON_ARRAY(), NOW(), NOW())
-         ON DUPLICATE KEY UPDATE
-           labels = COALESCE(
-             JSON_REMOVE(
-               labels,
-               JSON_UNQUOTE(JSON_SEARCH(labels, 'one', ?))
-             ),
-             JSON_ARRAY()
-           ),
-           updatedAt = NOW()`,
-        id,
-        instanceId,
-        chatId,
-        labelId,
-      );
-    } else {
-      // PostgreSQL version
-      await this.prismaRepository.$executeRawUnsafe(
-        `INSERT INTO "Chat" ("id", "instanceId", "remoteJid", "labels", "createdAt", "updatedAt")
-         VALUES ($4, $2, $3, '[]'::jsonb, NOW(), NOW()) ON CONFLICT ("instanceId", "remoteJid")
-       DO
-        UPDATE
-            SET "labels" = COALESCE (
-            (
-            SELECT jsonb_agg(elem)
-            FROM jsonb_array_elements_text("Chat"."labels") AS elem
-            WHERE elem <> $1
-            ),
-            '[]'::jsonb
-            ),
-            "updatedAt" = NOW();`,
-        labelId,
-        instanceId,
-        chatId,
-        id,
-      );
-    }
+    await this.prismaRepository.$executeRawUnsafe(
+      `INSERT INTO "Chat" ("id", "instanceId", "remoteJid", "labels", "createdAt", "updatedAt")
+       VALUES ($4, $2, $3, '[]'::jsonb, NOW(), NOW()) ON CONFLICT ("instanceId", "remoteJid")
+     DO
+      UPDATE
+          SET "labels" = COALESCE (
+          (
+          SELECT jsonb_agg(elem)
+          FROM jsonb_array_elements_text("Chat"."labels") AS elem
+          WHERE elem <> $1
+          ),
+          '[]'::jsonb
+          ),
+          "updatedAt" = NOW();`,
+      labelId,
+      instanceId,
+      chatId,
+      id,
+    );
   }
 
   public async baileysOnWhatsapp(jid: string) {
@@ -6093,7 +5096,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
       if (!message.pushName) {
         if (messageKey.fromMe) {
-          message.pushName = 'You';
+          message.pushName = 'Você';
         } else if (message.contextInfo) {
           const contextInfo = message.contextInfo as { participant?: string };
           if (contextInfo.participant) {
@@ -6114,301 +5117,6 @@ export class BaileysStartupService extends ChannelStartupService {
         currentPage: query.page,
         records: formattedMessages,
       },
-    };
-  }
-
-  public async baileysDecryptPollVote(pollCreationMessageKey: proto.IMessageKey) {
-    try {
-      this.logger.verbose('Starting poll vote decryption process');
-
-      // Buscar a mensagem de criação da enquete
-      const pollCreationMessage = (await this.getMessage(pollCreationMessageKey, true)) as proto.IWebMessageInfo;
-
-      if (!pollCreationMessage) {
-        throw new NotFoundException('Poll creation message not found');
-      }
-
-      // Extrair opções da enquete
-      const pollOptions =
-        (pollCreationMessage.message as any)?.pollCreationMessage?.options ||
-        (pollCreationMessage.message as any)?.pollCreationMessageV3?.options ||
-        [];
-
-      if (!pollOptions || pollOptions.length === 0) {
-        throw new NotFoundException('Poll options not found');
-      }
-
-      // Recuperar chave de criptografia
-      const pollMessageSecret = (await this.getMessage(pollCreationMessageKey)) as any;
-      let pollEncKey = pollMessageSecret?.messageContextInfo?.messageSecret;
-
-      if (!pollEncKey) {
-        throw new NotFoundException('Poll encryption key not found');
-      }
-
-      // Normalizar chave de criptografia
-      if (typeof pollEncKey === 'string') {
-        pollEncKey = Buffer.from(pollEncKey, 'base64');
-      } else if (pollEncKey?.type === 'Buffer' && Array.isArray(pollEncKey.data)) {
-        pollEncKey = Buffer.from(pollEncKey.data);
-      }
-
-      if (Buffer.isBuffer(pollEncKey) && pollEncKey.length === 44) {
-        pollEncKey = Buffer.from(pollEncKey.toString('utf8'), 'base64');
-      }
-
-      // Buscar todas as mensagens de atualização de votos
-      const allPollUpdateMessages = await this.prismaRepository.message.findMany({
-        where: {
-          instanceId: this.instanceId,
-          messageType: 'pollUpdateMessage',
-        },
-        select: {
-          id: true,
-          key: true,
-          message: true,
-          messageTimestamp: true,
-        },
-      });
-
-      this.logger.verbose(`Found ${allPollUpdateMessages.length} pollUpdateMessage messages in database`);
-
-      // Filtrar apenas mensagens relacionadas a esta enquete específica
-      const pollUpdateMessages = allPollUpdateMessages.filter((msg) => {
-        const pollUpdate = (msg.message as any)?.pollUpdateMessage;
-        if (!pollUpdate) return false;
-
-        const creationKey = pollUpdate.pollCreationMessageKey;
-        if (!creationKey) return false;
-
-        return (
-          creationKey.id === pollCreationMessageKey.id &&
-          jidNormalizedUser(creationKey.remoteJid || '') === jidNormalizedUser(pollCreationMessageKey.remoteJid || '')
-        );
-      });
-
-      this.logger.verbose(`Filtered to ${pollUpdateMessages.length} matching poll update messages`);
-
-      // Preparar candidatos de JID para descriptografia
-      const creatorCandidates = [
-        this.instance.wuid,
-        this.client.user?.lid,
-        pollCreationMessage.key.participant,
-        (pollCreationMessage.key as any).participantAlt,
-        pollCreationMessage.key.remoteJid,
-        (pollCreationMessage.key as any).remoteJidAlt,
-      ].filter(Boolean);
-
-      const uniqueCreators = [...new Set(creatorCandidates.map((id) => jidNormalizedUser(id)))];
-
-      // Processar votos
-      const votesByUser = new Map<string, { timestamp: number; selectedOptions: string[]; voterJid: string }>();
-
-      this.logger.verbose(`Processing ${pollUpdateMessages.length} poll update messages for decryption`);
-
-      for (const pollUpdateMsg of pollUpdateMessages) {
-        const pollVote = (pollUpdateMsg.message as any)?.pollUpdateMessage?.vote;
-        if (!pollVote) continue;
-
-        const key = pollUpdateMsg.key as any;
-        const voterCandidates = [
-          this.instance.wuid,
-          this.client.user?.lid,
-          key.participant,
-          key.participantAlt,
-          key.remoteJidAlt,
-          key.remoteJid,
-        ].filter(Boolean);
-
-        const uniqueVoters = [...new Set(voterCandidates.map((id) => jidNormalizedUser(id)))];
-
-        let selectedOptionNames: string[] = [];
-        let successfulVoterJid: string | undefined;
-
-        // Verificar se o voto já está descriptografado
-        if (pollVote.selectedOptions && Array.isArray(pollVote.selectedOptions)) {
-          const selectedOptions = pollVote.selectedOptions;
-          this.logger.verbose('Vote already has selectedOptions, checking format');
-
-          // Verificar se são strings (já descriptografado) ou buffers (precisa descriptografar)
-          if (selectedOptions.length > 0 && typeof selectedOptions[0] === 'string') {
-            // Já está descriptografado como nomes de opções
-            selectedOptionNames = selectedOptions;
-            successfulVoterJid = uniqueVoters[0];
-            this.logger.verbose(
-              `Using already decrypted vote: voter=${successfulVoterJid}, options=${selectedOptionNames.join(',')}`,
-            );
-          } else {
-            // Está como hash, precisa converter para nomes
-            selectedOptionNames = pollOptions
-              .filter((option: any) => {
-                const hash = createHash('sha256').update(option.optionName).digest();
-                return selectedOptions.some((selected: any) => {
-                  if (Buffer.isBuffer(selected)) {
-                    return Buffer.compare(selected, hash) === 0;
-                  }
-                  return false;
-                });
-              })
-              .map((option: any) => option.optionName);
-            successfulVoterJid = uniqueVoters[0];
-          }
-        } else if (pollVote.encPayload && pollEncKey) {
-          // Tentar descriptografar
-          let decryptedVote: any = null;
-
-          for (const creator of uniqueCreators) {
-            for (const voter of uniqueVoters) {
-              try {
-                decryptedVote = decryptPollVote(pollVote, {
-                  pollCreatorJid: creator,
-                  pollMsgId: pollCreationMessage.key.id,
-                  pollEncKey,
-                  voterJid: voter,
-                } as any);
-
-                if (decryptedVote) {
-                  successfulVoterJid = voter;
-                  break;
-                }
-              } catch {
-                // Continue tentando outras combinações
-              }
-            }
-            if (decryptedVote) break;
-          }
-
-          if (decryptedVote && decryptedVote.selectedOptions) {
-            // Converter hashes para nomes de opções
-            selectedOptionNames = pollOptions
-              .filter((option: any) => {
-                const hash = createHash('sha256').update(option.optionName).digest();
-                return decryptedVote.selectedOptions.some((selected: any) => {
-                  if (Buffer.isBuffer(selected)) {
-                    return Buffer.compare(selected, hash) === 0;
-                  }
-                  return false;
-                });
-              })
-              .map((option: any) => option.optionName);
-
-            this.logger.verbose(
-              `Successfully decrypted vote for voter: ${successfulVoterJid}, creator: ${uniqueCreators[0]}`,
-            );
-          } else {
-            this.logger.warn(`Failed to decrypt vote. Last error: Could not decrypt with any combination`);
-            continue;
-          }
-        } else {
-          this.logger.warn('Vote has no encPayload and no selectedOptions, skipping');
-          continue;
-        }
-
-        if (selectedOptionNames.length > 0 && successfulVoterJid) {
-          const normalizedVoterJid = jidNormalizedUser(successfulVoterJid);
-          const existingVote = votesByUser.get(normalizedVoterJid);
-
-          // Manter apenas o voto mais recente de cada usuário
-          if (!existingVote || pollUpdateMsg.messageTimestamp > existingVote.timestamp) {
-            votesByUser.set(normalizedVoterJid, {
-              timestamp: pollUpdateMsg.messageTimestamp,
-              selectedOptions: selectedOptionNames,
-              voterJid: successfulVoterJid,
-            });
-          }
-        }
-      }
-
-      // Agrupar votos por opção
-      const results: Record<string, { votes: number; voters: string[] }> = {};
-
-      // Inicializar todas as opções com zero votos
-      pollOptions.forEach((option: any) => {
-        results[option.optionName] = {
-          votes: 0,
-          voters: [],
-        };
-      });
-
-      // Agregar votos
-      votesByUser.forEach((voteData) => {
-        voteData.selectedOptions.forEach((optionName) => {
-          if (results[optionName]) {
-            results[optionName].votes++;
-            if (!results[optionName].voters.includes(voteData.voterJid)) {
-              results[optionName].voters.push(voteData.voterJid);
-            }
-          }
-        });
-      });
-
-      // Obter nome da enquete
-      const pollName =
-        (pollCreationMessage.message as any)?.pollCreationMessage?.name ||
-        (pollCreationMessage.message as any)?.pollCreationMessageV3?.name ||
-        'Enquete sem nome';
-
-      // Calcular total de votos únicos
-      const totalVotes = votesByUser.size;
-
-      return {
-        poll: {
-          name: pollName,
-          totalVotes,
-          results,
-        },
-      };
-    } catch (error) {
-      this.logger.error(`Error decrypting poll votes: ${error}`);
-      throw new InternalServerErrorException('Error decrypting poll votes', error.toString());
-    }
-  }
-
-  public async fetchChannels(query: Query<Contact>) {
-    const page = Number((query as any)?.page ?? 1);
-    const limit = Number((query as any)?.limit ?? (query as any)?.rows ?? 50);
-    const skip = (page - 1) * limit;
-
-    const messages = await this.prismaRepository.message.findMany({
-      where: {
-        instanceId: this.instanceId,
-        AND: [{ key: { path: ['remoteJid'], not: null } }],
-      },
-      orderBy: { messageTimestamp: 'desc' },
-      select: {
-        key: true,
-        messageTimestamp: true,
-      },
-    });
-
-    const channelMap = new Map<string, { remoteJid: string; pushName: undefined; lastMessageTimestamp: number }>();
-
-    for (const msg of messages) {
-      const key = msg.key as any;
-      const remoteJid = key?.remoteJid as string | undefined;
-      if (!remoteJid || !isJidNewsletter(remoteJid)) continue;
-
-      if (!channelMap.has(remoteJid)) {
-        channelMap.set(remoteJid, {
-          remoteJid,
-          pushName: undefined, // Push name is never stored for channels, so we set it as undefined
-          lastMessageTimestamp: msg.messageTimestamp,
-        });
-      }
-    }
-
-    const allChannels = Array.from(channelMap.values());
-
-    const total = allChannels.length;
-    const pages = Math.ceil(total / limit);
-    const records = allChannels.slice(skip, skip + limit);
-
-    return {
-      total,
-      pages,
-      currentPage: page,
-      limit,
-      records,
     };
   }
 }

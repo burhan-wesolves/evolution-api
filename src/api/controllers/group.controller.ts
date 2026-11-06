@@ -9,7 +9,6 @@ import {
   GroupSendInvite,
   GroupSubjectDto,
   GroupToggleEphemeralDto,
-  GroupUpdateMemberAddModeDto,
   GroupUpdateParticipantDto,
   GroupUpdateSettingDto,
 } from '@api/dto/group.dto';
@@ -73,10 +72,6 @@ export class GroupController {
 
   public async updateGSetting(instance: InstanceDto, update: GroupUpdateSettingDto) {
     return await this.waMonitor.waInstances[instance.instanceName].updateGSetting(update);
-  }
-
-  public async updateMemberAddMode(instance: InstanceDto, update: GroupUpdateMemberAddModeDto) {
-    return await this.waMonitor.waInstances[instance.instanceName].updateMemberAddMode(update);
   }
 
   public async toggleEphemeral(instance: InstanceDto, update: GroupToggleEphemeralDto) {

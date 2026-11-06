@@ -14,7 +14,6 @@ export class Options {
   mentionsEveryOne?: boolean;
   mentioned?: string[];
   webhookUrl?: string;
-  messageId?: string;
 }
 
 export class MediaMessage {
@@ -25,8 +24,6 @@ export class MediaMessage {
   fileName?: string;
   // url or base64
   media: string;
-  gifPlayback?: boolean | string;
-  gifAttribution?: number | string;
 }
 
 export class StatusMessage {
@@ -48,7 +45,6 @@ export class Metadata {
   mentioned?: string[];
   encoding?: boolean;
   notConvertSticker?: boolean;
-  messageId?: string;
 }
 
 export class SendTextDto extends Metadata {
@@ -85,8 +81,6 @@ export class SendMediaDto extends Metadata {
   fileName?: string;
   // url or base64
   media: string;
-  gifPlayback?: boolean | string;
-  gifAttribution?: number | string;
 }
 
 export class SendPtvDto extends Metadata {
@@ -101,13 +95,9 @@ export class SendAudioDto extends Metadata {
   audio: string;
 }
 
-export type TypeButton = 'reply' | 'copy' | 'url' | 'call' | 'pix' | 'flow';
+export type TypeButton = 'reply' | 'copy' | 'url' | 'call' | 'pix';
 
 export type KeyType = 'phone' | 'email' | 'cpf' | 'cnpj' | 'random';
-
-export type FlowAction = 'navigate' | 'data_exchange';
-
-export type FlowMode = 'published' | 'draft';
 
 export class Button {
   type: TypeButton;
@@ -120,14 +110,6 @@ export class Button {
   name?: string;
   keyType?: KeyType;
   key?: string;
-  // WhatsApp Flows (galaxy_message) fields
-  flowId?: string;
-  flowToken?: string;
-  flowCta?: string;
-  flowAction?: FlowAction;
-  flowActionPayload?: Record<string, any>;
-  flowMessageVersion?: string;
-  flowMode?: FlowMode;
 }
 
 export class SendButtonsDto extends Metadata {
@@ -184,17 +166,4 @@ export class SendContactDto extends Metadata {
 export class SendReactionDto {
   key: proto.IMessageKey;
   reaction: string;
-}
-
-export class CarouselCard {
-  title?: string;
-  body: string;
-  footer?: string;
-  imageUrl?: string;
-  buttons: Button[];
-}
-
-export class SendCarouselDto extends Metadata {
-  body: string;
-  cards: CarouselCard[];
 }
