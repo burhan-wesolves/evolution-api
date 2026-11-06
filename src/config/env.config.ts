@@ -333,6 +333,42 @@ export type Webhook = {
   };
 };
 export type Pusher = { ENABLED: boolean; GLOBAL?: GlobalPusher; EVENTS: EventsPusher };
+export type WatchmanSmtp = {
+  HOST: string;
+  PORT: number;
+  SECURE: boolean;
+  USER: string;
+  PASS: string;
+  FROM: string;
+};
+export type Watchman = {
+  ENABLED: boolean;
+  // Instance names to watch. Empty => watch none, so enabling the feature alone
+  // cannot start tracking every tenant's messages by accident.
+  INSTANCES: string[];
+  // A dropped connection reconnects in seconds; only alert if it is still down
+  // after this, so a blip does not page anyone. A logout alerts immediately.
+  ALERT_DELAY_SECONDS: number;
+  // How often to retry messages our webhook never accepted.
+  REDELIVERY_INTERVAL_SECONDS: number;
+  // Leave the live webhook (which has its own retries) time to succeed before
+  // a sweep re-sends the same message.
+  REDELIVERY_MIN_AGE_SECONDS: number;
+  // Messages re-sent per sweep, per instance.
+  REDELIVERY_BATCH: number;
+  // After this many failed attempts a message is parked as `failed`.
+  MAX_ATTEMPTS: number;
+  // Where a watched instance's messages must be delivered. Set this and the
+  // watchman re-creates the instance's webhook configuration whenever it is
+  // missing -- which is every time an instance is deleted and recreated, the
+  // normal way to re-pair after a logout. The Webhook row cascades away with
+  // the instance, so without this the integration goes silently dead: nothing
+  // is delivered, nothing is replayed, and nothing errors, because there is no
+  // endpoint left to fail against. Empty disables the repair.
+  WEBHOOK_URL: string;
+  ALERT_TO: string[];
+  SMTP: WatchmanSmtp;
+};
 export type ConfigSessionPhone = { CLIENT: string; NAME: string };
 export type Baileys = { VERSION?: string };
 export type QrCode = { LIMIT: number; COLOR: string };
@@ -430,6 +466,7 @@ export interface Env {
   LANGUAGE: Language;
   WEBHOOK: Webhook;
   PUSHER: Pusher;
+  WATCHMAN: Watchman;
   CONFIG_SESSION_PHONE: ConfigSessionPhone;
   BAILEYS: Baileys;
   QRCODE: QrCode;
@@ -709,6 +746,31 @@ export class ConfigService {
         ENABLED: process.env?.WEBSOCKET_ENABLED === 'true',
         GLOBAL_EVENTS: process.env?.WEBSOCKET_GLOBAL_EVENTS === 'true',
         ALLOWED_HOSTS: process.env?.WEBSOCKET_ALLOWED_HOSTS,
+      },
+      WATCHMAN: {
+        ENABLED: process.env?.WATCHMAN_ENABLED === 'true',
+        INSTANCES: (process.env?.WATCHMAN_INSTANCES || '')
+          .split(',')
+          .map((name) => name.trim())
+          .filter((name) => name.length > 0),
+        ALERT_DELAY_SECONDS: Number.parseInt(process.env?.WATCHMAN_ALERT_DELAY_SECONDS) || 60,
+        REDELIVERY_INTERVAL_SECONDS: Number.parseInt(process.env?.WATCHMAN_REDELIVERY_INTERVAL_SECONDS) || 300,
+        REDELIVERY_MIN_AGE_SECONDS: Number.parseInt(process.env?.WATCHMAN_REDELIVERY_MIN_AGE_SECONDS) || 120,
+        REDELIVERY_BATCH: Number.parseInt(process.env?.WATCHMAN_REDELIVERY_BATCH) || 100,
+        MAX_ATTEMPTS: Number.parseInt(process.env?.WATCHMAN_MAX_ATTEMPTS) || 10,
+        WEBHOOK_URL: (process.env?.WATCHMAN_WEBHOOK_URL || '').trim(),
+        ALERT_TO: (process.env?.WATCHMAN_ALERT_TO || '')
+          .split(',')
+          .map((address) => address.trim())
+          .filter((address) => address.length > 0),
+        SMTP: {
+          HOST: process.env?.WATCHMAN_SMTP_HOST || '',
+          PORT: Number.parseInt(process.env?.WATCHMAN_SMTP_PORT) || 587,
+          SECURE: process.env?.WATCHMAN_SMTP_SECURE === 'true',
+          USER: process.env?.WATCHMAN_SMTP_USER || '',
+          PASS: process.env?.WATCHMAN_SMTP_PASS || '',
+          FROM: process.env?.WATCHMAN_SMTP_FROM || '',
+        },
       },
       PUSHER: {
         ENABLED: process.env?.PUSHER_ENABLED === 'true',

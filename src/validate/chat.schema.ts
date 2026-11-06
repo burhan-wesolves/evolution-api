@@ -153,6 +153,31 @@ export const deleteMessageSchema: JSONSchema7 = {
   ...isNotEmpty('id', 'remoteJid', 'participant'),
 };
 
+export const deleteMessageForMeSchema: JSONSchema7 = {
+  $id: v4(),
+  type: 'object',
+  properties: {
+    id: { type: 'string' },
+    remoteJid: { type: 'string' },
+    fromMe: { type: 'boolean', enum: [true, false] },
+    participant: { type: 'string' },
+    messageTimestamp: { type: 'integer', minimum: 1 },
+  },
+  required: ['id', 'remoteJid'],
+  ...isNotEmpty('id', 'remoteJid', 'participant'),
+};
+
+export const clearChatForMeSchema: JSONSchema7 = {
+  $id: v4(),
+  type: 'object',
+  properties: {
+    remoteJid: { type: 'string' },
+    beforeTimestamp: { type: 'integer', minimum: 1 },
+  },
+  required: ['remoteJid'],
+  ...isNotEmpty('remoteJid'),
+};
+
 export const profilePictureSchema: JSONSchema7 = {
   $id: v4(),
   type: 'object',

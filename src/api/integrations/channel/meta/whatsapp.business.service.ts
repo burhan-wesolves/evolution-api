@@ -1740,6 +1740,12 @@ export class BusinessStartupService extends ChannelStartupService {
   public async deleteMessage() {
     throw new BadRequestException('Method not available on WhatsApp Business API');
   }
+  public async deleteMessageForMe() {
+    throw new BadRequestException('Method not available on WhatsApp Business API');
+  }
+  public async clearChatForMe() {
+    throw new BadRequestException('Method not available on WhatsApp Business API');
+  }
 
   // methods not available on WhatsApp Business API
   public async mediaSticker() {

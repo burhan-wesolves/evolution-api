@@ -3,7 +3,9 @@ import { OfferCallDto } from '@api/dto/call.dto';
 import {
   ArchiveChatDto,
   BlockUserDto,
+  ClearChatForMeDto,
   DeleteMessage,
+  DeleteMessageForMeDto,
   getBase64FromMediaMessageDto,
   LastMessage,
   MarkChatUnreadDto,
@@ -60,7 +62,7 @@ import { chatwootImport } from '@api/integrations/chatbot/chatwoot/utils/chatwoo
 import * as s3Service from '@api/integrations/storage/s3/libs/minio.server';
 import { ProviderFiles } from '@api/provider/sessions';
 import { PrismaRepository, Query } from '@api/repository/repository.service';
-import { chatbotController, waMonitor } from '@api/server.module';
+import { chatbotController, waMonitor, watchmanService } from '@api/server.module';
 import { CacheService } from '@api/services/cache.service';
 import { ChannelStartupService } from '@api/services/channel.service';
 import { Events, MessageSubtype, TypeMediaMessage, wa } from '@api/types/wa.types';
@@ -87,6 +89,7 @@ import { createJid } from '@utils/createJid';
 import { fetchLatestWaWebVersion } from '@utils/fetchLatestWaWebVersion';
 import { makeProxyAgent, makeProxyAgentUndici } from '@utils/makeProxyAgent';
 import { getOnWhatsappCache, saveOnWhatsappCache } from '@utils/onWhatsappCache';
+import { reconnectDelayMs } from '@utils/reconnectBackoff';
 import { status } from '@utils/renderStatus';
 import useMultiFileAuthStatePrisma from '@utils/use-multi-file-auth-state-prisma';
 import { AuthStateProvider } from '@utils/use-multi-file-auth-state-provider-files';
@@ -166,6 +169,9 @@ export interface ExtendedIMessageKey extends proto.IMessageKey {
   server_id?: string;
   isViewOnce?: boolean;
 }
+
+// Long enough for a recipient's retry receipt to find the message; see deleteMessageForMe.
+const STORED_MESSAGE_PURGE_DELAY_MS = 5 * 60 * 1000;
 
 const groupMetadataCache = new CacheService(new CacheEngine(configService, 'groups').getEngine());
 
@@ -262,6 +268,8 @@ export class BaileysStartupService extends ChannelStartupService {
   private endSession = false;
   private isDeleting = false; // Flag to prevent reconnection during deletion
   private reconnectTimeout?: NodeJS.Timeout;
+  // Consecutive failed reconnects; drives reconnectDelayMs. Reset on 'open'.
+  private reconnectAttempts = 0;
   private logBaileys = this.configService.get<Log>('LOG').BAILEYS;
   private eventProcessingQueue: Promise<void> = Promise.resolve();
   private _lastStream515At = 0;
@@ -557,9 +565,14 @@ export class BaileysStartupService extends ChannelStartupService {
       }
 
       const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
-      // 408 = request timeout — added per #2501 to avoid reconnect loops on
-      // transient network drops where the server returned a 408 in the close.
-      const codesToNotReconnect = [DisconnectReason.loggedOut, DisconnectReason.forbidden, 402, 406, 408];
+      // 408 (connection lost / timed out) was in this list per #2501, to stop a
+      // reconnect loop on transient network drops. But a code here is TERMINAL:
+      // the branch below emits `logout.instance`, which wipes the session
+      // credentials -- so an ordinary network blip forced a QR rescan, and the
+      // messages sent meanwhile came back only through history sync. The loop
+      // is a reconnect-too-fast problem, so it is now handled by exponential
+      // backoff (reconnectDelayMs) instead, and a network drop keeps its session.
+      const codesToNotReconnect = [DisconnectReason.loggedOut, DisconnectReason.forbidden, 402, 406];
 
       const recentStream515 = Date.now() - this._lastStream515At < BaileysStartupService.STREAM_515_RECONNECT_GRACE_MS;
 
@@ -604,13 +617,18 @@ export class BaileysStartupService extends ChannelStartupService {
         instanceName: this.instance.name,
       });
 
+      watchmanService.onConnectionClosed(this.instance.name, { terminal: !shouldReconnect, statusCode });
+
       if (shouldReconnect) {
-        // Add 3 second delay before reconnection to prevent rapid reconnection loops
-        this.logger.info('Reconnecting in 3 seconds...');
+        // 3 s on the first retry, then exponential backoff capped at 5 min, so
+        // a persistent failure cannot spin into the loop #2501 described.
+        const delay = reconnectDelayMs(this.reconnectAttempts);
+        this.reconnectAttempts += 1;
+        this.logger.info(`Reconnecting in ${Math.round(delay / 1000)} seconds (attempt ${this.reconnectAttempts})...`);
         this.clearReconnectTimeout();
         this.reconnectTimeout = setTimeout(async () => {
           await this.connectToWhatsapp(this.phoneNumber);
-        }, 3000);
+        }, delay);
       } else {
         this.clearReconnectTimeout();
         this.logger.info(`Skipping reconnection for status code ${statusCode} (code is in codesToNotReconnect list)`);
@@ -652,6 +670,7 @@ export class BaileysStartupService extends ChannelStartupService {
         this.logger.warn('connectionUpdate: connection open but client.user is undefined, skipping');
         return;
       }
+      this.reconnectAttempts = 0;
       this.instance.wuid = this.client.user.id.replace(/:\d+/, '');
       try {
         const profilePic = await this.profilePicture(this.instance.wuid);
@@ -704,6 +723,10 @@ export class BaileysStartupService extends ChannelStartupService {
         profilePictureUrl: this.instance.profilePictureUrl,
         ...this.stateConnection,
       });
+
+      // Back online: cancel any pending alert and re-deliver whatever the
+      // downstream never accepted while we were away.
+      void watchmanService.onConnectionOpen(this.instance.name);
     }
 
     if (connection === 'connecting') {
@@ -880,7 +903,12 @@ export class BaileysStartupService extends ChannelStartupService {
       },
       msgRetryCounterCache: this.msgRetryCounterCache,
       generateHighQualityLinkPreview: true,
-      getMessage: async (key) => (await this.getMessage(key)) as Promise<proto.IMessage>,
+      // A message whose stored row is gone must read as "no message": getMessage's fallback is an
+      // empty conversation, and a retry receipt would relay that blank to the recipient.
+      getMessage: async (key) => {
+        const stored = (await this.getMessage(key)) as proto.IMessage;
+        return stored?.conversation === '' ? undefined : stored;
+      },
       // Removido browserOptions para usar Multi-Device nativo (não WebClient)
       markOnlineOnConnect: this.localSettings.alwaysOnline,
       retryRequestDelayMs: 350,
@@ -1334,6 +1362,22 @@ export class BaileysStartupService extends ChannelStartupService {
           await this.prismaRepository.message.createMany({ data: messagesRaw, skipDuplicates: true });
         }
 
+        // History sync goes out as MESSAGES_SET, which the downstream ignores,
+        // so these stay pending until the watchman replays them as upserts.
+        await watchmanService.recordInbound(
+          this.instance.name,
+          this.instanceId,
+          messagesRaw.map((m: any) => ({
+            record: {
+              keyId: m.key?.id,
+              remoteJid: m.key?.remoteJid,
+              fromMe: m.key?.fromMe,
+              messageTimestamp: m.messageTimestamp,
+            },
+            payload: m,
+          })),
+        );
+
         this.sendDataWebhook(Events.MESSAGES_SET, [...messagesRaw], true, undefined, {
           isLatest,
           progress,
@@ -1386,377 +1430,319 @@ export class BaileysStartupService extends ChannelStartupService {
     ) => {
       try {
         for (const received of messages) {
-          if (
-            received?.messageStubParameters?.some?.((param) =>
-              [
-                'No matching sessions found for message',
-                'Bad MAC',
-                'failed to decrypt message',
-                'SessionError',
-                'Invalid PreKey ID',
-                'No session record',
-                'No session found to decrypt message',
-                'Message absent from node',
-              ].some((err) => param?.includes?.(err)),
-            )
-          ) {
-            this.logger.warn(`Message ignored with messageStubParameters: ${JSON.stringify(received, null, 2)}`);
-            continue;
-          }
-          if (received.message?.conversation || received.message?.extendedTextMessage?.text) {
-            const text = received.message?.conversation || received.message?.extendedTextMessage?.text;
+          // Each message is isolated. One throw here -- a database error, a
+          // malformed payload -- used to abort the whole batch through the single
+          // try/catch below, and offline messages arrive after a reconnect as ONE
+          // consolidated batch, so one bad message lost every message after it.
+          try {
+            if (
+              received?.messageStubParameters?.some?.((param) =>
+                [
+                  'No matching sessions found for message',
+                  'Bad MAC',
+                  'failed to decrypt message',
+                  'SessionError',
+                  'Invalid PreKey ID',
+                  'No session record',
+                  'No session found to decrypt message',
+                  'Message absent from node',
+                ].some((err) => param?.includes?.(err)),
+              )
+            ) {
+              this.logger.warn(`Message ignored with messageStubParameters: ${JSON.stringify(received, null, 2)}`);
+              continue;
+            }
+            if (received.message?.conversation || received.message?.extendedTextMessage?.text) {
+              const text = received.message?.conversation || received.message?.extendedTextMessage?.text;
 
-            if (text == 'requestPlaceholder' && !requestId) {
-              const messageId = await this.client.requestPlaceholderResend(received.key);
+              if (text == 'requestPlaceholder' && !requestId) {
+                const messageId = await this.client.requestPlaceholderResend(received.key);
 
-              console.log('requested placeholder resync, id=', messageId);
-            } else if (requestId) {
-              console.log('Message received from phone, id=', requestId, received);
+                console.log('requested placeholder resync, id=', messageId);
+              } else if (requestId) {
+                console.log('Message received from phone, id=', requestId, received);
+              }
+
+              if (text == 'onDemandHistSync') {
+                const messageId = await this.client.fetchMessageHistory(50, received.key, received.messageTimestamp!);
+                console.log('requested on-demand sync, id=', messageId);
+              }
             }
 
-            if (text == 'onDemandHistSync') {
-              const messageId = await this.client.fetchMessageHistory(50, received.key, received.messageTimestamp!);
-              console.log('requested on-demand sync, id=', messageId);
-            }
-          }
+            const editedMessage =
+              received?.message?.protocolMessage || received?.message?.editedMessage?.message?.protocolMessage;
 
-          const editedMessage =
-            received?.message?.protocolMessage || received?.message?.editedMessage?.message?.protocolMessage;
+            if (editedMessage) {
+              if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled)
+                this.chatwootService.eventWhatsapp(
+                  'messages.edit',
+                  { instanceName: this.instance.name, instanceId: this.instance.id },
+                  editedMessage,
+                );
 
-          if (editedMessage) {
-            if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled)
-              this.chatwootService.eventWhatsapp(
-                'messages.edit',
-                { instanceName: this.instance.name, instanceId: this.instance.id },
-                editedMessage,
-              );
+              await this.sendDataWebhook(Events.MESSAGES_EDITED, editedMessage);
 
-            await this.sendDataWebhook(Events.MESSAGES_EDITED, editedMessage);
+              if (received.key?.id && editedMessage.key?.id) {
+                await this.baileysCache.set(`protocol_${received.key.id}`, editedMessage.key.id, 60 * 60 * 24);
+              }
 
-            if (received.key?.id && editedMessage.key?.id) {
-              await this.baileysCache.set(`protocol_${received.key.id}`, editedMessage.key.id, 60 * 60 * 24);
-            }
+              const oldMessage = await this.getMessage(editedMessage.key, true);
+              if ((oldMessage as any)?.id) {
+                const editedMessageTimestamp = Long.isLong(received?.messageTimestamp)
+                  ? Math.floor(received?.messageTimestamp.toNumber())
+                  : Math.floor(received?.messageTimestamp as number);
 
-            const oldMessage = await this.getMessage(editedMessage.key, true);
-            if ((oldMessage as any)?.id) {
-              const editedMessageTimestamp = Long.isLong(received?.messageTimestamp)
-                ? Math.floor(received?.messageTimestamp.toNumber())
-                : Math.floor(received?.messageTimestamp as number);
-
-              await this.prismaRepository.message.update({
-                where: { id: (oldMessage as any).id },
-                data: {
-                  message: editedMessage.editedMessage as any,
-                  messageTimestamp: editedMessageTimestamp,
-                  status: 'EDITED',
-                },
-              });
-              await this.prismaRepository.messageUpdate.create({
-                data: {
-                  fromMe: editedMessage.key.fromMe,
-                  keyId: editedMessage.key.id,
-                  remoteJid: editedMessage.key.remoteJid,
-                  status: 'EDITED',
-                  instanceId: this.instanceId,
-                  messageId: (oldMessage as any).id,
-                },
-              });
-            }
-          }
-
-          if ((type !== 'notify' && type !== 'append') || editedMessage || !received?.message) {
-            continue;
-          }
-
-          if (Long.isLong(received.messageTimestamp)) {
-            received.messageTimestamp = received.messageTimestamp?.toNumber();
-          }
-
-          if (settings?.groupsIgnore && received.key.remoteJid.includes('@g.us')) {
-            continue;
-          }
-
-          const existingChat = await this.prismaRepository.chat.findFirst({
-            where: { instanceId: this.instanceId, remoteJid: received.key.remoteJid },
-            select: { id: true, name: true },
-          });
-
-          if (
-            existingChat &&
-            received.pushName &&
-            existingChat.name !== received.pushName &&
-            received.pushName.trim().length > 0 &&
-            !received.key.fromMe &&
-            !received.key.remoteJid.includes('@g.us')
-          ) {
-            this.sendDataWebhook(Events.CHATS_UPSERT, [{ ...existingChat, name: received.pushName }]);
-            if (this.configService.get<Database>('DATABASE').SAVE_DATA.CHATS) {
-              try {
-                await this.prismaRepository.chat.update({
-                  where: { id: existingChat.id },
-                  data: { name: received.pushName },
+                await this.prismaRepository.message.update({
+                  where: { id: (oldMessage as any).id },
+                  data: {
+                    message: editedMessage.editedMessage as any,
+                    messageTimestamp: editedMessageTimestamp,
+                    status: 'EDITED',
+                  },
                 });
-              } catch {
-                console.log(`Chat insert record ignored: ${received.key.remoteJid} - ${this.instanceId}`);
+                await this.prismaRepository.messageUpdate.create({
+                  data: {
+                    fromMe: editedMessage.key.fromMe,
+                    keyId: editedMessage.key.id,
+                    remoteJid: editedMessage.key.remoteJid,
+                    status: 'EDITED',
+                    instanceId: this.instanceId,
+                    messageId: (oldMessage as any).id,
+                  },
+                });
               }
             }
-          }
 
-          const messageRaw = this.prepareMessage(received) as any;
-
-          if (messageRaw.messageType === 'pollUpdateMessage') {
-            const pollCreationKey = (messageRaw.message as any).pollUpdateMessage.pollCreationMessageKey;
-            const pollMessage = (await this.getMessage(pollCreationKey, true)) as proto.IWebMessageInfo;
-            const pollMessageSecret = (await this.getMessage(pollCreationKey)) as any;
-
-            if (pollMessage) {
-              const pollOptions =
-                (pollMessage.message as any).pollCreationMessage?.options ||
-                (pollMessage.message as any).pollCreationMessageV3?.options ||
-                [];
-              const pollVote = (messageRaw.message as any).pollUpdateMessage.vote;
-
-              const voterJid = received.key.fromMe
-                ? this.instance.wuid
-                : received.key.participant || received.key.remoteJid;
-
-              let pollEncKey = pollMessageSecret?.messageContextInfo?.messageSecret;
-
-              let successfulVoterJid = voterJid;
-
-              if (typeof pollEncKey === 'string') {
-                pollEncKey = Buffer.from(pollEncKey, 'base64');
-              } else if (pollEncKey?.type === 'Buffer' && Array.isArray(pollEncKey.data)) {
-                pollEncKey = Buffer.from(pollEncKey.data);
-              }
-
-              if (Buffer.isBuffer(pollEncKey) && pollEncKey.length === 44) {
-                pollEncKey = Buffer.from(pollEncKey.toString('utf8'), 'base64');
-              }
-
-              if (pollVote.encPayload && pollEncKey) {
-                const creatorCandidates = [
-                  this.instance.wuid,
-                  this.client.user?.lid,
-                  pollMessage.key.participant,
-                  (pollMessage.key as any).participantAlt,
-                  pollMessage.key.remoteJid,
-                ];
-
-                const key = received.key as any;
-                const voterCandidates = [
-                  this.instance.wuid,
-                  this.client.user?.lid,
-                  key.participant,
-                  key.participantAlt,
-                  key.remoteJidAlt,
-                  key.remoteJid,
-                ];
-
-                const uniqueCreators = [
-                  ...new Set(creatorCandidates.filter(Boolean).map((id) => jidNormalizedUser(id))),
-                ];
-                const uniqueVoters = [...new Set(voterCandidates.filter(Boolean).map((id) => jidNormalizedUser(id)))];
-
-                let decryptedVote;
-
-                for (const creator of uniqueCreators) {
-                  for (const voter of uniqueVoters) {
-                    try {
-                      decryptedVote = decryptPollVote(pollVote, {
-                        pollCreatorJid: creator,
-                        pollMsgId: pollMessage.key.id,
-                        pollEncKey,
-                        voterJid: voter,
-                      } as any);
-                      if (decryptedVote) {
-                        successfulVoterJid = voter;
-                        break;
-                      }
-                    } catch {
-                      // Continue trying
-                    }
-                  }
-                  if (decryptedVote) break;
-                }
-
-                if (decryptedVote) {
-                  Object.assign(pollVote, decryptedVote);
-                }
-              }
-
-              const selectedOptions = pollVote?.selectedOptions || [];
-
-              const selectedOptionNames = pollOptions
-                .filter((option) => {
-                  const hash = createHash('sha256').update(option.optionName).digest();
-                  return selectedOptions.some((selected) => Buffer.compare(selected, hash) === 0);
-                })
-                .map((option) => option.optionName);
-
-              (messageRaw.message as any).pollUpdateMessage.vote.selectedOptions = selectedOptionNames;
-
-              const pollUpdates = pollOptions.map((option) => ({
-                name: option.optionName,
-                voters: selectedOptionNames.includes(option.optionName) ? [successfulVoterJid] : [],
-              }));
-
-              (messageRaw as any).pollUpdates = pollUpdates;
+            if ((type !== 'notify' && type !== 'append') || editedMessage || !received?.message) {
+              continue;
             }
-          }
 
-          const isMedia =
-            received?.message?.imageMessage ||
-            received?.message?.videoMessage ||
-            received?.message?.stickerMessage ||
-            received?.message?.documentMessage ||
-            received?.message?.documentWithCaptionMessage ||
-            received?.message?.ptvMessage ||
-            received?.message?.audioMessage;
-
-          const isVideo = received?.message?.videoMessage;
-
-          if (this.localSettings.readMessages && received.key.id !== 'status@broadcast') {
-            await this.client.readMessages([received.key]);
-          }
-
-          if (this.localSettings.readStatus && received.key.id === 'status@broadcast') {
-            await this.client.readMessages([received.key]);
-          }
-
-          if (
-            this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
-            this.localChatwoot?.enabled &&
-            !received.key.id.includes('@broadcast')
-          ) {
-            const chatwootSentMessage = await this.chatwootService.eventWhatsapp(
-              Events.MESSAGES_UPSERT,
-              { instanceName: this.instance.name, instanceId: this.instanceId },
-              messageRaw,
-            );
-
-            if (chatwootSentMessage?.id) {
-              messageRaw.chatwootMessageId = chatwootSentMessage.id;
-              messageRaw.chatwootInboxId = chatwootSentMessage.inbox_id;
-              messageRaw.chatwootConversationId = chatwootSentMessage.conversation_id;
+            if (Long.isLong(received.messageTimestamp)) {
+              received.messageTimestamp = received.messageTimestamp?.toNumber();
             }
-          }
 
-          if (this.configService.get<Openai>('OPENAI').ENABLED && received?.message?.audioMessage) {
-            const openAiDefaultSettings = await this.prismaRepository.openaiSetting.findFirst({
-              where: { instanceId: this.instanceId },
-              include: { OpenaiCreds: true },
+            if (settings?.groupsIgnore && received.key.remoteJid.includes('@g.us')) {
+              continue;
+            }
+
+            const existingChat = await this.prismaRepository.chat.findFirst({
+              where: { instanceId: this.instanceId, remoteJid: received.key.remoteJid },
+              select: { id: true, name: true },
             });
 
-            if (openAiDefaultSettings && openAiDefaultSettings.openaiCredsId && openAiDefaultSettings.speechToText) {
-              (messageRaw.message as any).speechToText =
-                `[audio] ${await this.openaiService.speechToText(received, this)}`;
+            if (
+              existingChat &&
+              received.pushName &&
+              existingChat.name !== received.pushName &&
+              received.pushName.trim().length > 0 &&
+              !received.key.fromMe &&
+              !received.key.remoteJid.includes('@g.us')
+            ) {
+              this.sendDataWebhook(Events.CHATS_UPSERT, [{ ...existingChat, name: received.pushName }]);
+              if (this.configService.get<Database>('DATABASE').SAVE_DATA.CHATS) {
+                try {
+                  await this.prismaRepository.chat.update({
+                    where: { id: existingChat.id },
+                    data: { name: received.pushName },
+                  });
+                } catch {
+                  console.log(`Chat insert record ignored: ${received.key.remoteJid} - ${this.instanceId}`);
+                }
+              }
             }
-          }
 
-          if (this.configService.get<Database>('DATABASE').SAVE_DATA.NEW_MESSAGE) {
-            // eslint-disable-next-line @typescript-eslint/no-unused-vars
-            const { pollUpdates, ...messageData } = messageRaw as any;
-            const msg = await this.prismaRepository.message.create({ data: messageData });
+            const messageRaw = this.prepareMessage(received) as any;
 
-            const { remoteJid } = received.key;
-            const timestamp = msg.messageTimestamp;
-            const fromMe = received.key.fromMe.toString();
-            const messageKey = `${remoteJid}_${timestamp}_${fromMe}`;
+            if (messageRaw.messageType === 'pollUpdateMessage') {
+              const pollCreationKey = (messageRaw.message as any).pollUpdateMessage.pollCreationMessageKey;
+              const pollMessage = (await this.getMessage(pollCreationKey, true)) as proto.IWebMessageInfo;
+              const pollMessageSecret = (await this.getMessage(pollCreationKey)) as any;
 
-            const cachedTimestamp = await this.baileysCache.get(messageKey);
+              if (pollMessage) {
+                const pollOptions =
+                  (pollMessage.message as any).pollCreationMessage?.options ||
+                  (pollMessage.message as any).pollCreationMessageV3?.options ||
+                  [];
+                const pollVote = (messageRaw.message as any).pollUpdateMessage.vote;
 
-            if (!cachedTimestamp) {
-              if (!received.key.fromMe) {
-                if (msg.status === status[3]) {
-                  this.logger.log(`Update not read messages ${remoteJid}`);
-                  await this.updateChatUnreadMessages(remoteJid);
-                } else if (msg.status === status[4]) {
+                const voterJid = received.key.fromMe
+                  ? this.instance.wuid
+                  : received.key.participant || received.key.remoteJid;
+
+                let pollEncKey = pollMessageSecret?.messageContextInfo?.messageSecret;
+
+                let successfulVoterJid = voterJid;
+
+                if (typeof pollEncKey === 'string') {
+                  pollEncKey = Buffer.from(pollEncKey, 'base64');
+                } else if (pollEncKey?.type === 'Buffer' && Array.isArray(pollEncKey.data)) {
+                  pollEncKey = Buffer.from(pollEncKey.data);
+                }
+
+                if (Buffer.isBuffer(pollEncKey) && pollEncKey.length === 44) {
+                  pollEncKey = Buffer.from(pollEncKey.toString('utf8'), 'base64');
+                }
+
+                if (pollVote.encPayload && pollEncKey) {
+                  const creatorCandidates = [
+                    this.instance.wuid,
+                    this.client.user?.lid,
+                    pollMessage.key.participant,
+                    (pollMessage.key as any).participantAlt,
+                    pollMessage.key.remoteJid,
+                  ];
+
+                  const key = received.key as any;
+                  const voterCandidates = [
+                    this.instance.wuid,
+                    this.client.user?.lid,
+                    key.participant,
+                    key.participantAlt,
+                    key.remoteJidAlt,
+                    key.remoteJid,
+                  ];
+
+                  const uniqueCreators = [
+                    ...new Set(creatorCandidates.filter(Boolean).map((id) => jidNormalizedUser(id))),
+                  ];
+                  const uniqueVoters = [...new Set(voterCandidates.filter(Boolean).map((id) => jidNormalizedUser(id)))];
+
+                  let decryptedVote;
+
+                  for (const creator of uniqueCreators) {
+                    for (const voter of uniqueVoters) {
+                      try {
+                        decryptedVote = decryptPollVote(pollVote, {
+                          pollCreatorJid: creator,
+                          pollMsgId: pollMessage.key.id,
+                          pollEncKey,
+                          voterJid: voter,
+                        } as any);
+                        if (decryptedVote) {
+                          successfulVoterJid = voter;
+                          break;
+                        }
+                      } catch {
+                        // Continue trying
+                      }
+                    }
+                    if (decryptedVote) break;
+                  }
+
+                  if (decryptedVote) {
+                    Object.assign(pollVote, decryptedVote);
+                  }
+                }
+
+                const selectedOptions = pollVote?.selectedOptions || [];
+
+                const selectedOptionNames = pollOptions
+                  .filter((option) => {
+                    const hash = createHash('sha256').update(option.optionName).digest();
+                    return selectedOptions.some((selected) => Buffer.compare(selected, hash) === 0);
+                  })
+                  .map((option) => option.optionName);
+
+                (messageRaw.message as any).pollUpdateMessage.vote.selectedOptions = selectedOptionNames;
+
+                const pollUpdates = pollOptions.map((option) => ({
+                  name: option.optionName,
+                  voters: selectedOptionNames.includes(option.optionName) ? [successfulVoterJid] : [],
+                }));
+
+                (messageRaw as any).pollUpdates = pollUpdates;
+              }
+            }
+
+            const isMedia =
+              received?.message?.imageMessage ||
+              received?.message?.videoMessage ||
+              received?.message?.stickerMessage ||
+              received?.message?.documentMessage ||
+              received?.message?.documentWithCaptionMessage ||
+              received?.message?.ptvMessage ||
+              received?.message?.audioMessage;
+
+            const isVideo = received?.message?.videoMessage;
+
+            if (this.localSettings.readMessages && received.key.id !== 'status@broadcast') {
+              await this.client.readMessages([received.key]);
+            }
+
+            if (this.localSettings.readStatus && received.key.id === 'status@broadcast') {
+              await this.client.readMessages([received.key]);
+            }
+
+            if (
+              this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
+              this.localChatwoot?.enabled &&
+              !received.key.id.includes('@broadcast')
+            ) {
+              const chatwootSentMessage = await this.chatwootService.eventWhatsapp(
+                Events.MESSAGES_UPSERT,
+                { instanceName: this.instance.name, instanceId: this.instanceId },
+                messageRaw,
+              );
+
+              if (chatwootSentMessage?.id) {
+                messageRaw.chatwootMessageId = chatwootSentMessage.id;
+                messageRaw.chatwootInboxId = chatwootSentMessage.inbox_id;
+                messageRaw.chatwootConversationId = chatwootSentMessage.conversation_id;
+              }
+            }
+
+            if (this.configService.get<Openai>('OPENAI').ENABLED && received?.message?.audioMessage) {
+              const openAiDefaultSettings = await this.prismaRepository.openaiSetting.findFirst({
+                where: { instanceId: this.instanceId },
+                include: { OpenaiCreds: true },
+              });
+
+              if (openAiDefaultSettings && openAiDefaultSettings.openaiCredsId && openAiDefaultSettings.speechToText) {
+                (messageRaw.message as any).speechToText =
+                  `[audio] ${await this.openaiService.speechToText(received, this)}`;
+              }
+            }
+
+            if (this.configService.get<Database>('DATABASE').SAVE_DATA.NEW_MESSAGE) {
+              // eslint-disable-next-line @typescript-eslint/no-unused-vars
+              const { pollUpdates, ...messageData } = messageRaw as any;
+              const msg = await this.prismaRepository.message.create({ data: messageData });
+
+              const { remoteJid } = received.key;
+              const timestamp = msg.messageTimestamp;
+              const fromMe = received.key.fromMe.toString();
+              const messageKey = `${remoteJid}_${timestamp}_${fromMe}`;
+
+              const cachedTimestamp = await this.baileysCache.get(messageKey);
+
+              if (!cachedTimestamp) {
+                if (!received.key.fromMe) {
+                  if (msg.status === status[3]) {
+                    this.logger.log(`Update not read messages ${remoteJid}`);
+                    await this.updateChatUnreadMessages(remoteJid);
+                  } else if (msg.status === status[4]) {
+                    this.logger.log(`Update readed messages ${remoteJid} - ${timestamp}`);
+                    await this.updateMessagesReadedByTimestamp(remoteJid, timestamp);
+                  }
+                } else {
+                  // is send message by me
                   this.logger.log(`Update readed messages ${remoteJid} - ${timestamp}`);
                   await this.updateMessagesReadedByTimestamp(remoteJid, timestamp);
                 }
+
+                await this.baileysCache.set(messageKey, true, this.MESSAGE_CACHE_TTL_SECONDS);
               } else {
-                // is send message by me
-                this.logger.log(`Update readed messages ${remoteJid} - ${timestamp}`);
-                await this.updateMessagesReadedByTimestamp(remoteJid, timestamp);
+                this.logger.info(`Update readed messages duplicated ignored [avoid deadlock]: ${messageKey}`);
               }
 
-              await this.baileysCache.set(messageKey, true, this.MESSAGE_CACHE_TTL_SECONDS);
-            } else {
-              this.logger.info(`Update readed messages duplicated ignored [avoid deadlock]: ${messageKey}`);
+              if (isMedia && this.configService.get<S3>('S3').ENABLE) {
+                await this.uploadInboundMediaToS3(received, msg, messageRaw, Boolean(isVideo));
+              }
             }
 
-            if (isMedia) {
-              if (this.configService.get<S3>('S3').ENABLE) {
+            if (this.localWebhook.enabled) {
+              if (isMedia && this.localWebhook.webhookBase64) {
                 try {
-                  if (isVideo && !this.configService.get<S3>('S3').SAVE_VIDEO) {
-                    this.logger.warn('Video upload is disabled. Skipping video upload.');
-                    // Skip video upload by returning early from this block
-                    return;
-                  }
-
-                  const message: any = received;
-
-                  // Verificação adicional para garantir que há conteúdo de mídia real
-                  const hasRealMedia = this.hasValidMediaContent(message);
-
-                  if (!hasRealMedia) {
-                    this.logger.warn('Message detected as media but contains no valid media content');
-                  } else {
-                    const media = await this.getBase64FromMediaMessage({ message }, true);
-
-                    if (!media) {
-                      this.logger.verbose('No valid media to upload (messageContextInfo only), skipping MinIO');
-                      return;
-                    }
-
-                    const { buffer, mediaType, fileName, size } = media;
-                    const mimetype = mimeTypes.lookup(fileName).toString();
-                    const fullName = join(
-                      `${this.instance.id}`,
-                      received.key.remoteJid,
-                      mediaType,
-                      `${Date.now()}_${fileName}`,
-                    );
-                    await s3Service.uploadFile(fullName, buffer, size.fileLength?.low, { 'Content-Type': mimetype });
-
-                    await this.prismaRepository.media.create({
-                      data: {
-                        messageId: msg.id,
-                        instanceId: this.instanceId,
-                        type: mediaType,
-                        fileName: fullName,
-                        mimetype,
-                      },
-                    });
-
-                    const mediaUrl = await s3Service.getObjectUrl(fullName);
-
-                    (messageRaw.message as any).mediaUrl = mediaUrl;
-
-                    await this.prismaRepository.message.update({ where: { id: msg.id }, data: messageRaw });
-                  }
-                } catch (error) {
-                  this.logger.error(['Error on upload file to minio', error?.message, error?.stack]);
-                }
-              }
-            }
-          }
-
-          if (this.localWebhook.enabled) {
-            if (isMedia && this.localWebhook.webhookBase64) {
-              try {
-                const buffer = await downloadMediaMessage(
-                  { key: received.key, message: received?.message },
-                  'buffer',
-                  {},
-                  { logger: P({ level: 'error' }) as any, reuploadRequest: this.client.updateMediaMessage },
-                );
-
-                if (buffer) {
-                  (messageRaw.message as any).base64 = buffer.toString('base64');
-                } else {
-                  // retry to download media
                   const buffer = await downloadMediaMessage(
                     { key: received.key, message: received?.message },
                     'buffer',
@@ -1766,97 +1752,129 @@ export class BaileysStartupService extends ChannelStartupService {
 
                   if (buffer) {
                     (messageRaw.message as any).base64 = buffer.toString('base64');
+                  } else {
+                    // retry to download media
+                    const buffer = await downloadMediaMessage(
+                      { key: received.key, message: received?.message },
+                      'buffer',
+                      {},
+                      { logger: P({ level: 'error' }) as any, reuploadRequest: this.client.updateMediaMessage },
+                    );
+
+                    if (buffer) {
+                      (messageRaw.message as any).base64 = buffer.toString('base64');
+                    }
                   }
+                } catch (error) {
+                  this.logger.error(['Error converting media to base64', error?.message]);
                 }
-              } catch (error) {
-                this.logger.error(['Error converting media to base64', error?.message]);
               }
             }
-          }
 
-          this.logger.verbose(messageRaw);
+            this.logger.verbose(messageRaw);
 
-          if (messageRaw.key.remoteJid?.includes('@lid') && messageRaw.key.remoteJidAlt) {
-            const lid = messageRaw.key.remoteJid;
+            if (messageRaw.key.remoteJid?.includes('@lid') && messageRaw.key.remoteJidAlt) {
+              const lid = messageRaw.key.remoteJid;
 
-            messageRaw.key.remoteJid = messageRaw.key.remoteJidAlt;
-            messageRaw.key.remoteJidAlt = lid;
+              messageRaw.key.remoteJid = messageRaw.key.remoteJidAlt;
+              messageRaw.key.remoteJidAlt = lid;
 
-            messageRaw.key.addressingMode = 'pn';
-          }
-          console.log(messageRaw);
+              messageRaw.key.addressingMode = 'pn';
+            }
 
-          this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
-
-          await chatbotController.emit({
-            instance: { instanceName: this.instance.name, instanceId: this.instanceId },
-            remoteJid: (messageRaw.key as any).remoteJid,
-            msg: messageRaw,
-            pushName: messageRaw.pushName,
-          });
-
-          const contact = await this.prismaRepository.contact.findFirst({
-            where: { remoteJid: received.key.remoteJid, instanceId: this.instanceId },
-          });
-
-          const contactRaw: {
-            remoteJid: string;
-            pushName: string;
-            profilePicUrl?: string;
-            instanceId: string;
-          } = {
-            remoteJid: received.key.remoteJid,
-            pushName: received.key.fromMe ? '' : received.key.fromMe == null ? '' : received.pushName,
-            profilePicUrl: (await this.profilePicture(received.key.remoteJid)).profilePictureUrl,
-            instanceId: this.instanceId,
-          };
-
-          if (contactRaw.remoteJid === 'status@broadcast') {
-            continue;
-          }
-
-          if (contactRaw.remoteJid.includes('@s.whatsapp') || contactRaw.remoteJid.includes('@lid')) {
-            await saveOnWhatsappCache([
+            await watchmanService.recordInbound(this.instance.name, this.instanceId, [
               {
-                remoteJid:
-                  (messageRaw.key as any).addressingMode === 'lid'
-                    ? (messageRaw.key as any).remoteJidAlt
-                    : (messageRaw.key as any).remoteJid,
-                remoteJidAlt: (messageRaw.key as any).remoteJidAlt,
-                lid: (messageRaw.key as any).addressingMode === 'lid' ? 'lid' : null,
+                record: {
+                  keyId: messageRaw.key?.id,
+                  remoteJid: messageRaw.key?.remoteJid,
+                  fromMe: messageRaw.key?.fromMe,
+                  messageTimestamp: messageRaw.messageTimestamp,
+                },
+                payload: messageRaw,
               },
             ]);
-          }
 
-          if (contact) {
-            this.sendDataWebhook(Events.CONTACTS_UPDATE, contactRaw);
+            this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
 
-            if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
-              await this.chatwootService.eventWhatsapp(
-                Events.CONTACTS_UPDATE,
-                { instanceName: this.instance.name, instanceId: this.instanceId },
-                contactRaw,
-              );
+            await chatbotController.emit({
+              instance: { instanceName: this.instance.name, instanceId: this.instanceId },
+              remoteJid: (messageRaw.key as any).remoteJid,
+              msg: messageRaw,
+              pushName: messageRaw.pushName,
+            });
+
+            const contact = await this.prismaRepository.contact.findFirst({
+              where: { remoteJid: received.key.remoteJid, instanceId: this.instanceId },
+            });
+
+            const contactRaw: {
+              remoteJid: string;
+              pushName: string;
+              profilePicUrl?: string;
+              instanceId: string;
+            } = {
+              remoteJid: received.key.remoteJid,
+              pushName: received.key.fromMe ? '' : received.key.fromMe == null ? '' : received.pushName,
+              profilePicUrl: (await this.profilePicture(received.key.remoteJid)).profilePictureUrl,
+              instanceId: this.instanceId,
+            };
+
+            if (contactRaw.remoteJid === 'status@broadcast') {
+              continue;
             }
+
+            if (contactRaw.remoteJid.includes('@s.whatsapp') || contactRaw.remoteJid.includes('@lid')) {
+              await saveOnWhatsappCache([
+                {
+                  remoteJid:
+                    (messageRaw.key as any).addressingMode === 'lid'
+                      ? (messageRaw.key as any).remoteJidAlt
+                      : (messageRaw.key as any).remoteJid,
+                  remoteJidAlt: (messageRaw.key as any).remoteJidAlt,
+                  lid: (messageRaw.key as any).addressingMode === 'lid' ? 'lid' : null,
+                },
+              ]);
+            }
+
+            if (contact) {
+              this.sendDataWebhook(Events.CONTACTS_UPDATE, contactRaw);
+
+              if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
+                await this.chatwootService.eventWhatsapp(
+                  Events.CONTACTS_UPDATE,
+                  { instanceName: this.instance.name, instanceId: this.instanceId },
+                  contactRaw,
+                );
+              }
+
+              if (this.configService.get<Database>('DATABASE').SAVE_DATA.CONTACTS)
+                await this.prismaRepository.contact.upsert({
+                  where: {
+                    remoteJid_instanceId: { remoteJid: contactRaw.remoteJid, instanceId: contactRaw.instanceId },
+                  },
+                  create: contactRaw,
+                  update: contactRaw,
+                });
+
+              continue;
+            }
+
+            this.sendDataWebhook(Events.CONTACTS_UPSERT, contactRaw);
 
             if (this.configService.get<Database>('DATABASE').SAVE_DATA.CONTACTS)
               await this.prismaRepository.contact.upsert({
                 where: { remoteJid_instanceId: { remoteJid: contactRaw.remoteJid, instanceId: contactRaw.instanceId } },
-                create: contactRaw,
                 update: contactRaw,
+                create: contactRaw,
               });
-
-            continue;
+          } catch (error) {
+            this.logger.error([
+              'Failed to process an upserted message; continuing with the rest of the batch',
+              received?.key?.id,
+              error?.message,
+              error?.stack,
+            ]);
           }
-
-          this.sendDataWebhook(Events.CONTACTS_UPSERT, contactRaw);
-
-          if (this.configService.get<Database>('DATABASE').SAVE_DATA.CONTACTS)
-            await this.prismaRepository.contact.upsert({
-              where: { remoteJid_instanceId: { remoteJid: contactRaw.remoteJid, instanceId: contactRaw.instanceId } },
-              update: contactRaw,
-              create: contactRaw,
-            });
         }
       } catch (error) {
         this.logger.error(error);
@@ -4508,6 +4526,87 @@ export class BaileysStartupService extends ChannelStartupService {
     }
   }
 
+  /**
+   * Delete for me: an app-state change on this account only. The recipient's copy is untouched,
+   * which is what separates this from deleteMessage below, a revoke that reaches their phone.
+   *
+   * The stored row outlives the call by STORED_MESSAGE_PURGE_DELAY_MS on purpose. A recipient device
+   * that failed to decrypt asks us to resend, and Baileys answers that retry from this row, so
+   * dropping it at send time would turn a slow device into a "waiting for this message" bubble. A
+   * restart loses the timer; clearChatForMe removes whatever is left.
+   */
+  public async deleteMessageForMe(data: DeleteMessageForMeDto) {
+    const stored = (await this.getMessage({ id: data.id }, true)) as proto.IWebMessageInfo & {
+      messageTimestamp?: number;
+    };
+    const key: proto.IMessageKey = stored?.key ?? {
+      id: data.id,
+      remoteJid: data.remoteJid,
+      fromMe: data.fromMe ?? true,
+      ...(data.participant ? { participant: data.participant } : {}),
+    };
+    const timestamp = Number(data.messageTimestamp ?? stored?.messageTimestamp ?? Math.floor(Date.now() / 1000));
+    try {
+      await this.client.chatModify(
+        { deleteForMe: { deleteMedia: true, key, timestamp } },
+        key.remoteJid ?? data.remoteJid,
+      );
+    } catch (error) {
+      throw new InternalServerErrorException('Error while deleting message for me', error?.toString());
+    }
+    setTimeout(() => {
+      this.prismaRepository.message
+        .deleteMany({ where: { instanceId: this.instanceId, key: { path: ['id'], equals: data.id } } })
+        .catch((error) => this.logger.warn(`Could not purge a stored message: ${error?.toString()}`));
+    }, STORED_MESSAGE_PURGE_DELAY_MS).unref();
+    return { deleted: true };
+  }
+
+  /**
+   * Clear one chat from this account up to `beforeTimestamp`, then drop the stored rows up to the
+   * same instant. Newer messages stay: they may still be in flight to the webhook. Clearing on
+   * WhatsApp can fail (no app-state key yet, socket down) and the rows still go, so the report says
+   * which half happened. Repeat calls find nothing left and answer `deleted: 0`.
+   */
+  public async clearChatForMe(data: ClearChatForMeDto) {
+    const remoteJid = createJid(data.remoteJid);
+    const before = data.beforeTimestamp ?? Math.floor(Date.now() / 1000);
+    const where = {
+      instanceId: this.instanceId,
+      messageTimestamp: { lte: before },
+      key: { path: ['remoteJid'], equals: remoteJid },
+    };
+    // Watchman rows parked as `failed` keep their payload so an endpoint repair can revive them
+    // (that is why failure itself must not null it). A cleared chat is being forgotten, so drop the
+    // message bodies here. Pending rows are left alone: they are still owed a delivery.
+    try {
+      await this.prismaRepository.messageDelivery.updateMany({
+        where: {
+          instanceName: this.instance.name,
+          remoteJid,
+          messageTimestamp: { lte: before },
+          status: 'failed',
+        },
+        data: { payload: null },
+      });
+    } catch (error) {
+      this.logger.warn(`Could not prune parked watchman payloads: ${error?.toString()}`);
+    }
+    const last = await this.prismaRepository.message.findFirst({ where, orderBy: { messageTimestamp: 'desc' } });
+    if (!last) return { cleared: false, deleted: 0 };
+
+    let cleared = true;
+    try {
+      const lastMessage = { key: last.key as proto.IMessageKey, messageTimestamp: last.messageTimestamp };
+      await this.client.chatModify({ clear: true, lastMessages: [lastMessage] }, remoteJid);
+    } catch (error) {
+      cleared = false;
+      this.logger.warn(`Could not clear a chat on WhatsApp: ${error?.toString()}`);
+    }
+    const { count } = await this.prismaRepository.message.deleteMany({ where });
+    return { cleared, deleted: count };
+  }
+
   public async deleteMessage(del: DeleteMessage) {
     try {
       const response = await this.client.sendMessage(del.remoteJid, { delete: del });
@@ -5396,6 +5495,71 @@ export class BaileysStartupService extends ChannelStartupService {
     }
 
     return obj;
+  }
+
+  /**
+   * Upload an inbound message's media to S3/MinIO and stamp its mediaUrl.
+   *
+   * Extracted from the messages.upsert loop. The early exits below used to be
+   * `return` statements INSIDE that loop, so skipping one video (S3_SAVE_VIDEO
+   * off) or one media-less message left the whole handler: that message never
+   * reached its webhook, and every later message in the batch was never even
+   * saved. Offline messages arrive as one consolidated batch after a reconnect,
+   * so a single odd attachment silently lost everything sent after it. Here a
+   * `return` means what its comment always said: skip the upload, nothing more.
+   */
+  private async uploadInboundMediaToS3(
+    received: WAMessage,
+    msg: { id: string },
+    messageRaw: any,
+    isVideo: boolean,
+  ): Promise<void> {
+    try {
+      if (isVideo && !this.configService.get<S3>('S3').SAVE_VIDEO) {
+        this.logger.warn('Video upload is disabled. Skipping video upload.');
+        // Skip only the upload; the message is still delivered.
+        return;
+      }
+
+      const message: any = received;
+
+      // Verificação adicional para garantir que há conteúdo de mídia real
+      const hasRealMedia = this.hasValidMediaContent(message);
+
+      if (!hasRealMedia) {
+        this.logger.warn('Message detected as media but contains no valid media content');
+      } else {
+        const media = await this.getBase64FromMediaMessage({ message }, true);
+
+        if (!media) {
+          this.logger.verbose('No valid media to upload (messageContextInfo only), skipping MinIO');
+          return;
+        }
+
+        const { buffer, mediaType, fileName, size } = media;
+        const mimetype = mimeTypes.lookup(fileName).toString();
+        const fullName = join(`${this.instance.id}`, received.key.remoteJid, mediaType, `${Date.now()}_${fileName}`);
+        await s3Service.uploadFile(fullName, buffer, size.fileLength?.low, { 'Content-Type': mimetype });
+
+        await this.prismaRepository.media.create({
+          data: {
+            messageId: msg.id,
+            instanceId: this.instanceId,
+            type: mediaType,
+            fileName: fullName,
+            mimetype,
+          },
+        });
+
+        const mediaUrl = await s3Service.getObjectUrl(fullName);
+
+        (messageRaw.message as any).mediaUrl = mediaUrl;
+
+        await this.prismaRepository.message.update({ where: { id: msg.id }, data: messageRaw });
+      }
+    } catch (error) {
+      this.logger.error(['Error on upload file to minio', error?.message, error?.stack]);
+    }
   }
 
   private prepareMessage(message: WAMessage): Message {

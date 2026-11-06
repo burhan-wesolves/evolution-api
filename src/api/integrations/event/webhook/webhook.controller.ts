@@ -1,8 +1,10 @@
 import { EventDto } from '@api/integrations/event/event.dto';
 import { PrismaRepository } from '@api/repository/repository.service';
 import { WAMonitoringService } from '@api/services/monitor.service';
+import { WATCHMAN_DELIVERED_EVENT } from '@api/services/watchman.rules';
 import { wa } from '@api/types/wa.types';
 import { configService, Log, Webhook } from '@config/env.config';
+import { eventEmitter } from '@config/event.config';
 import { Logger } from '@config/logger.config';
 // import { BadRequestException } from '@exceptions';
 import axios, { AxiosInstance, AxiosResponse } from 'axios';
@@ -181,6 +183,8 @@ export class WebhookController extends EventController implements EventControlle
               scope: 'instance',
               requestHeaders: enhancedHeaders as Record<string, string>,
             });
+
+            await this.notifyWatchmanDelivered(we, instanceName, data);
           }
         } catch (error) {
           this.logger.error({
@@ -244,6 +248,8 @@ export class WebhookController extends EventController implements EventControlle
                 requestHeaders: globalHeaders,
               },
             );
+
+            await this.notifyWatchmanDelivered(we, instanceName, data);
           }
         } catch (error) {
           this.logger.error({
@@ -260,6 +266,29 @@ export class WebhookController extends EventController implements EventControlle
           });
         }
       }
+    }
+  }
+
+  /**
+   * A webhook accepted this message, so the watchman can stop tracking it.
+   *
+   * Called from BOTH the per-instance and the global branch: a deployment may
+   * use only the global webhook, and marking delivered on just one of them
+   * would leave every message pending and re-sent until it hit max attempts.
+   *
+   * Awaited (emitAsync), so a re-delivery sweep re-reading the row cannot race
+   * this write. Only MESSAGES_UPSERT counts: a 2xx on a MESSAGES_SET history
+   * batch means only that the receiver ignored it.
+   */
+  private async notifyWatchmanDelivered(we: string, instanceName: string, data: unknown): Promise<void> {
+    if (we !== 'MESSAGES_UPSERT') return;
+    const keyId = (data as any)?.key?.id;
+    if (!keyId) return;
+    try {
+      await eventEmitter.emitAsync(WATCHMAN_DELIVERED_EVENT, { instanceName, keyId });
+    } catch (error) {
+      // Bookkeeping must never fail a delivery that already succeeded.
+      this.logger.error(['watchman: could not record a delivery', error?.message]);
     }
   }
 
