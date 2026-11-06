@@ -351,5 +351,4 @@ export DATABASE_PROVIDER=postgresql  # or mysql
 - **Structured logging**: Pino logger with correlation IDs
 - **Error tracking**: Comprehensive error scenarios
 - **Health checks**: Instance status and connection monitoring
-- **Telemetry**: Usage analytics (non-sensitive data only)
 

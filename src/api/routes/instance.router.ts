@@ -95,6 +95,48 @@ export class InstanceRouter extends RouterBroker {
         });
 
         return res.status(HttpStatus.OK).json(response);
+      })
+      // ─── Aliases for the modern Manager UI bundle ────────────────────────
+      // The compiled manager bundle calls these paramless routes with the
+      // per-instance token in the apikey header. The guards resolve the
+      // instance and populate req.params.instanceName so we can delegate to
+      // the existing path-param controllers below.
+      .post('/reconnect', ...guards, async (req, res) => {
+        const response = await this.dataValidate<InstanceDto>({
+          request: req,
+          schema: null,
+          ClassRef: InstanceDto,
+          execute: (instance) => instanceController.restartInstance(instance),
+        });
+        return res.status(HttpStatus.OK).json(response);
+      })
+      .delete('/logout', ...guards, async (req, res) => {
+        const response = await this.dataValidate<InstanceDto>({
+          request: req,
+          schema: null,
+          ClassRef: InstanceDto,
+          execute: (instance) => instanceController.logout(instance),
+        });
+        return res.status(HttpStatus.OK).json(response);
+      })
+      .get('/qr', ...guards, async (req, res) => {
+        const response = await this.dataValidate<InstanceDto>({
+          request: req,
+          schema: null,
+          ClassRef: InstanceDto,
+          execute: (instance) => instanceController.connectToWhatsapp(instance),
+        });
+        return res.status(HttpStatus.OK).json(response);
+      })
+      .get('/all', ...guards, async (req, res) => {
+        const key = req.get('apikey');
+        const response = await this.dataValidate<InstanceDto>({
+          request: req,
+          schema: null,
+          ClassRef: InstanceDto,
+          execute: (instance) => instanceController.fetchInstances(instance, key),
+        });
+        return res.status(HttpStatus.OK).json(response);
       });
   }
 

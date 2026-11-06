@@ -44,6 +44,7 @@ import { WAMonitoringService } from './services/monitor.service';
 import { ProxyService } from './services/proxy.service';
 import { SettingsService } from './services/settings.service';
 import { TemplateService } from './services/template.service';
+import { WatchmanService } from './services/watchman.service';
 
 const logger = new Logger('WA MODULE');
 
@@ -137,5 +138,7 @@ export const n8nController = new N8nController(n8nService, prismaRepository, waM
 
 const evoaiService = new EvoaiService(waMonitor, prismaRepository, configService, openaiService);
 export const evoaiController = new EvoaiController(evoaiService, prismaRepository, waMonitor);
+
+export const watchmanService = new WatchmanService(prismaRepository, waMonitor);
 
 logger.info('Module - ON');

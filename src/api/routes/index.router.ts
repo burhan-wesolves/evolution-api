@@ -1,12 +1,11 @@
 import { authGuard } from '@api/guards/auth.guard';
 import { instanceExistsGuard, instanceLoggedGuard } from '@api/guards/instance.guard';
-import Telemetry from '@api/guards/telemetry.guard';
 import { ChannelRouter } from '@api/integrations/channel/channel.router';
 import { ChatbotRouter } from '@api/integrations/chatbot/chatbot.router';
 import { EventRouter } from '@api/integrations/event/event.router';
 import { StorageRouter } from '@api/integrations/storage/storage.router';
 import { waMonitor } from '@api/server.module';
-import { configService, Database, Facebook } from '@config/env.config';
+import { ChatUi, configService, Database, Facebook, Integrations } from '@config/env.config';
 import { fetchLatestWaWebVersion } from '@utils/fetchLatestWaWebVersion';
 import { NextFunction, Request, Response, Router } from 'express';
 import fs from 'fs';
@@ -38,9 +37,9 @@ enum HttpStatus {
 const router: Router = Router();
 const serverConfig = configService.get('SERVER');
 const databaseConfig = configService.get<Database>('DATABASE');
+const integrationsEnabled = configService.get<Integrations>('INTEGRATIONS')?.ENABLED !== false;
+const chatUiEnabled = configService.get<ChatUi>('CHAT_UI')?.ENABLED !== false;
 const guards = [instanceExistsGuard, instanceLoggedGuard, authGuard['apikey']];
-
-const telemetry = new Telemetry();
 
 const packageJson = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
 
@@ -191,8 +190,6 @@ router.get('/assets/*', (req, res) => {
 });
 
 router
-  .use((req, res, next) => telemetry.collectTelemetry(req, res, next))
-
   .get('/', async (req, res) => {
     res.status(HttpStatus.OK).json({
       status: HttpStatus.OK,
@@ -202,6 +199,8 @@ router
       manager: !serverConfig.DISABLE_MANAGER ? `${req.protocol}://${req.get('host')}/manager` : undefined,
       documentation: `https://doc.evolution-api.com`,
       whatsappWebVersion: (await fetchLatestWaWebVersion({})).version.join('.'),
+      integrationsEnabled,
+      chatUiEnabled,
     });
   })
   .post('/verify-creds', authGuard['apikey'], async (req, res) => {
@@ -226,7 +225,10 @@ router
   .use('/label', new LabelRouter(...guards).router)
   .use('', new ChannelRouter(configService, ...guards).router)
   .use('', new EventRouter(configService, ...guards).router)
-  .use('', new ChatbotRouter(...guards).router)
   .use('', new StorageRouter(...guards).router);
+
+if (integrationsEnabled) {
+  router.use('', new ChatbotRouter(...guards).router);
+}
 
 export { HttpStatus, router };

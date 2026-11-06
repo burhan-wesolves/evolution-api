@@ -16,7 +16,6 @@ import { Events, wa } from '@api/types/wa.types';
 import { AudioConverter, Chatwoot, ConfigService, Openai, S3 } from '@config/env.config';
 import { BadRequestException, InternalServerErrorException } from '@exceptions';
 import { createJid } from '@utils/createJid';
-import { sendTelemetry } from '@utils/sendTelemetry';
 import axios from 'axios';
 import { isBase64, isURL } from 'class-validator';
 import EventEmitter2 from 'eventemitter2';
@@ -115,6 +114,15 @@ export class EvolutionStartupService extends ChannelStartupService {
 
   public async connectToWhatsapp(data?: any): Promise<any> {
     if (!data) {
+      this.stateConnection = { state: 'open' };
+
+      if (this.instanceId) {
+        await this.prismaRepository.instance.update({
+          where: { id: this.instanceId },
+          data: { connectionStatus: 'open' },
+        });
+      }
+
       this.loadChatwoot();
       return;
     }
@@ -171,8 +179,6 @@ export class EvolutionStartupService extends ChannelStartupService {
         }
 
         this.logger.log(messageRaw);
-
-        sendTelemetry(`received.message.${messageRaw.messageType ?? 'unknown'}`);
 
         this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
 
@@ -318,7 +324,7 @@ export class EvolutionStartupService extends ChannelStartupService {
 
       let audioFile;
 
-      const messageId = v4();
+      const messageId = options?.messageId ?? v4();
 
       let messageRaw: any;
 
@@ -548,6 +554,7 @@ export class EvolutionStartupService extends ChannelStartupService {
         linkPreview: data?.linkPreview,
         mentionsEveryOne: data?.mentionsEveryOne,
         mentioned: data?.mentioned,
+        messageId: data?.messageId,
       },
       null,
       isIntegration,
@@ -613,6 +620,7 @@ export class EvolutionStartupService extends ChannelStartupService {
         linkPreview: data?.linkPreview,
         mentionsEveryOne: data?.mentionsEveryOne,
         mentioned: data?.mentioned,
+        messageId: data?.messageId,
       },
       file,
       isIntegration,
@@ -711,6 +719,7 @@ export class EvolutionStartupService extends ChannelStartupService {
         linkPreview: data?.linkPreview,
         mentionsEveryOne: data?.mentionsEveryOne,
         mentioned: data?.mentioned,
+        messageId: data?.messageId,
       },
       file,
       isIntegration,
@@ -736,6 +745,7 @@ export class EvolutionStartupService extends ChannelStartupService {
         quoted: data?.quoted,
         mentionsEveryOne: data?.mentionsEveryOne,
         mentioned: data?.mentioned,
+        messageId: data?.messageId,
       },
       null,
       isIntegration,
@@ -760,6 +770,12 @@ export class EvolutionStartupService extends ChannelStartupService {
     throw new BadRequestException('Method not available on Evolution Channel');
   }
   public async deleteMessage() {
+    throw new BadRequestException('Method not available on Evolution Channel');
+  }
+  public async deleteMessageForMe() {
+    throw new BadRequestException('Method not available on Evolution Channel');
+  }
+  public async clearChatForMe() {
     throw new BadRequestException('Method not available on Evolution Channel');
   }
   public async mediaSticker() {

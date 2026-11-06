@@ -1,14 +1,18 @@
 import { EventDto } from '@api/integrations/event/event.dto';
 import { PrismaRepository } from '@api/repository/repository.service';
 import { WAMonitoringService } from '@api/services/monitor.service';
+import { WATCHMAN_DELIVERED_EVENT } from '@api/services/watchman.rules';
 import { wa } from '@api/types/wa.types';
 import { configService, Log, Webhook } from '@config/env.config';
+import { eventEmitter } from '@config/event.config';
 import { Logger } from '@config/logger.config';
 // import { BadRequestException } from '@exceptions';
-import axios, { AxiosInstance } from 'axios';
+import axios, { AxiosInstance, AxiosResponse } from 'axios';
+import { createHmac } from 'crypto';
 import * as jwt from 'jsonwebtoken';
 
 import { EmitData, EventController, EventControllerInterface } from '../event.controller';
+import { WebhookHistoryEntry, webhookHistoryService, WebhookHistoryStatus } from './webhook.history.service';
 
 export class WebhookController extends EventController implements EventControllerInterface {
   private readonly logger = new Logger('WebhookController');
@@ -22,32 +26,52 @@ export class WebhookController extends EventController implements EventControlle
     //   throw new BadRequestException('Invalid "url" property');
     // }
 
-    if (!data.webhook?.enabled) {
-      data.webhook.events = [];
+    const incoming = data.webhook ?? ({} as NonNullable<EventDto['webhook']>);
+    const enabled = incoming.enabled ?? false;
+    const currentEvents = Array.isArray(incoming.events) ? incoming.events : [];
+
+    let normalizedEvents: string[];
+    if (!enabled) {
+      // Preserve the existing events list when the webhook is just being
+      // toggled off — otherwise the user has to re-pick every event after
+      // re-enabling, which was the symptom behind "webhook gone on refresh".
+      const existing = await this.prisma.webhook.findUnique({
+        where: { instanceId: this.monitor.waInstances[instanceName].instanceId },
+        select: { events: true },
+      });
+      const existingEvents = Array.isArray(existing?.events) ? (existing.events as string[]) : [];
+      normalizedEvents = currentEvents.length > 0 ? currentEvents : existingEvents;
     } else {
-      if (0 === data.webhook.events.length) {
-        data.webhook.events = EventController.events;
-      }
+      normalizedEvents = currentEvents.length > 0 ? currentEvents : EventController.events;
     }
+
+    data.webhook = {
+      ...incoming,
+      enabled,
+      events: normalizedEvents,
+      url: incoming.url ?? '',
+      base64: incoming.base64 ?? false,
+      byEvents: incoming.byEvents ?? false,
+    };
 
     return this.prisma.webhook.upsert({
       where: {
         instanceId: this.monitor.waInstances[instanceName].instanceId,
       },
       update: {
-        enabled: data.webhook?.enabled,
-        events: data.webhook?.events,
-        url: data.webhook?.url,
-        headers: data.webhook?.headers,
+        enabled: data.webhook.enabled,
+        events: data.webhook.events,
+        url: data.webhook.url,
+        headers: data.webhook.headers,
         webhookBase64: data.webhook.base64,
         webhookByEvents: data.webhook.byEvents,
       },
       create: {
-        enabled: data.webhook?.enabled,
-        events: data.webhook?.events,
+        enabled: data.webhook.enabled,
+        events: data.webhook.events,
         instanceId: this.monitor.waInstances[instanceName].instanceId,
-        url: data.webhook?.url,
-        headers: data.webhook?.headers,
+        url: data.webhook.url,
+        headers: data.webhook.headers,
         webhookBase64: data.webhook.base64,
         webhookByEvents: data.webhook.byEvents,
       },
@@ -83,6 +107,17 @@ export class WebhookController extends EventController implements EventControlle
       webhookHeaders['Authorization'] = `Bearer ${jwtToken}`;
 
       delete webhookHeaders['jwt_key'];
+    } else if (!webhookHeaders['Authorization']) {
+      // Global fallback: if no per-instance jwt_key was configured but the
+      // deployment specified a global webhook bearer (e.g. the Supabase
+      // JWT_SECRET shared with the edge runtime), mint a short-lived JWT
+      // and attach it as the Authorization header. This lets every outbound
+      // webhook pass an authenticated identity to receivers that gate on
+      // JWT (Supabase Edge Functions) without per-instance config drift.
+      const globalKey = configService.get<Webhook>('WEBHOOK').BEARER_JWT?.KEY?.trim();
+      if (globalKey) {
+        webhookHeaders['Authorization'] = `Bearer ${this.generateJwtToken(globalKey)}`;
+      }
     }
 
     const we = event.replace(/[.-]/gm, '_').toUpperCase();
@@ -124,13 +159,32 @@ export class WebhookController extends EventController implements EventControlle
 
         try {
           if (instance?.enabled && regex.test(instance.url)) {
+            // Add custom headers for better webhook tracking and debugging
+            const enhancedHeaders = {
+              ...webhookHeaders,
+              'Content-Type': 'application/json',
+              'X-Instance-ID': this.monitor.waInstances[instanceName].instanceId,
+              'X-Instance-Name': instanceName,
+              'X-Event-Type': event,
+              'X-Timestamp': Date.now().toString(),
+              'User-Agent': 'EvolutionAPI-Webhook/2.3.7',
+            };
+            this.applySignatureHeaders(enhancedHeaders, webhookData, webhookConfig);
+
             const httpService = axios.create({
               baseURL,
-              headers: webhookHeaders as Record<string, string> | undefined,
+              headers: enhancedHeaders as Record<string, string>,
               timeout: webhookConfig.REQUEST?.TIMEOUT_MS ?? 30000,
             });
 
-            await this.retryWebhookRequest(httpService, webhookData, `${origin}.sendData-Webhook`, baseURL, serverUrl);
+            await this.retryWebhookRequest(httpService, webhookData, `${origin}.sendData-Webhook`, baseURL, serverUrl, {
+              instanceName,
+              event,
+              scope: 'instance',
+              requestHeaders: enhancedHeaders as Record<string, string>,
+            });
+
+            await this.notifyWatchmanDelivered(we, instanceName, data);
           }
         } catch (error) {
           this.logger.error({
@@ -169,8 +223,15 @@ export class WebhookController extends EventController implements EventControlle
 
         try {
           if (regex.test(globalURL)) {
+            const globalHeaders: Record<string, string> = {
+              'Content-Type': 'application/json',
+              'User-Agent': 'EvolutionAPI-Webhook/2.3.7',
+            };
+            this.applySignatureHeaders(globalHeaders, webhookData, webhookConfig);
+
             const httpService = axios.create({
               baseURL: globalURL,
+              headers: globalHeaders,
               timeout: webhookConfig.REQUEST?.TIMEOUT_MS ?? 30000,
             });
 
@@ -180,7 +241,15 @@ export class WebhookController extends EventController implements EventControlle
               `${origin}.sendData-Webhook-Global`,
               globalURL,
               serverUrl,
+              {
+                instanceName,
+                event,
+                scope: 'global',
+                requestHeaders: globalHeaders,
+              },
             );
+
+            await this.notifyWatchmanDelivered(we, instanceName, data);
           }
         } catch (error) {
           this.logger.error({
@@ -200,12 +269,41 @@ export class WebhookController extends EventController implements EventControlle
     }
   }
 
+  /**
+   * A webhook accepted this message, so the watchman can stop tracking it.
+   *
+   * Called from BOTH the per-instance and the global branch: a deployment may
+   * use only the global webhook, and marking delivered on just one of them
+   * would leave every message pending and re-sent until it hit max attempts.
+   *
+   * Awaited (emitAsync), so a re-delivery sweep re-reading the row cannot race
+   * this write. Only MESSAGES_UPSERT counts: a 2xx on a MESSAGES_SET history
+   * batch means only that the receiver ignored it.
+   */
+  private async notifyWatchmanDelivered(we: string, instanceName: string, data: unknown): Promise<void> {
+    if (we !== 'MESSAGES_UPSERT') return;
+    const keyId = (data as any)?.key?.id;
+    if (!keyId) return;
+    try {
+      await eventEmitter.emitAsync(WATCHMAN_DELIVERED_EVENT, { instanceName, keyId });
+    } catch (error) {
+      // Bookkeeping must never fail a delivery that already succeeded.
+      this.logger.error(['watchman: could not record a delivery', error?.message]);
+    }
+  }
+
   private async retryWebhookRequest(
     httpService: AxiosInstance,
     webhookData: any,
     origin: string,
     baseURL: string,
     serverUrl: string,
+    historyCtx: {
+      instanceName: string;
+      event: string;
+      scope: 'instance' | 'global';
+      requestHeaders?: Record<string, string>;
+    },
     maxRetries?: number,
     delaySeconds?: number,
   ): Promise<void> {
@@ -218,17 +316,29 @@ export class WebhookController extends EventController implements EventControlle
     const nonRetryableStatusCodes = webhookConfig.RETRY?.NON_RETRYABLE_STATUS_CODES ?? [400, 401, 403, 404, 422];
 
     let attempts = 0;
+    const startedAt = Date.now();
 
     while (attempts < maxRetryAttempts) {
       try {
-        await httpService.post('', webhookData);
+        const response: AxiosResponse = await httpService.post('', webhookData);
         if (attempts > 0) {
           this.logger.log({
             local: `${origin}`,
-            message: `Sucesso no envio após ${attempts + 1} tentativas`,
+            message: `Delivered successfully after ${attempts + 1} attempts`,
             url: baseURL,
           });
         }
+        this.recordHistory({
+          ...historyCtx,
+          url: baseURL,
+          status: 'success',
+          httpStatus: response?.status,
+          attempts: attempts + 1,
+          startedAt,
+          finishedAt: Date.now(),
+          requestBody: webhookData,
+          responseBody: response?.data,
+        });
         return;
       } catch (error) {
         attempts++;
@@ -238,17 +348,30 @@ export class WebhookController extends EventController implements EventControlle
         if (error?.response?.status && nonRetryableStatusCodes.includes(error.response.status)) {
           this.logger.error({
             local: `${origin}`,
-            message: `Erro não recuperável (${error.response.status}): ${error?.message}. Cancelando retentativas.`,
+            message: `Non-recoverable error (${error.response.status}): ${error?.message}. Cancelling retries.`,
             statusCode: error?.response?.status,
             url: baseURL,
             server_url: serverUrl,
+          });
+          this.recordHistory({
+            ...historyCtx,
+            url: baseURL,
+            status: 'failure',
+            httpStatus: error?.response?.status,
+            attempts,
+            startedAt,
+            finishedAt: Date.now(),
+            errorMessage: error?.message,
+            errorCode: error?.code,
+            requestBody: webhookData,
+            responseBody: error?.response?.data,
           });
           throw error;
         }
 
         this.logger.error({
           local: `${origin}`,
-          message: `Tentativa ${attempts}/${maxRetryAttempts} falhou: ${isTimeout ? 'Timeout da requisição' : error?.message}`,
+          message: `Attempt ${attempts}/${maxRetryAttempts} failed: ${isTimeout ? 'Request timeout' : error?.message}`,
           hostName: error?.hostname,
           syscall: error?.syscall,
           code: error?.code,
@@ -262,6 +385,19 @@ export class WebhookController extends EventController implements EventControlle
         });
 
         if (attempts === maxRetryAttempts) {
+          this.recordHistory({
+            ...historyCtx,
+            url: baseURL,
+            status: 'failure',
+            httpStatus: error?.response?.status,
+            attempts,
+            startedAt,
+            finishedAt: Date.now(),
+            errorMessage: error?.message,
+            errorCode: error?.code,
+            requestBody: webhookData,
+            responseBody: error?.response?.data,
+          });
           throw error;
         }
 
@@ -275,7 +411,7 @@ export class WebhookController extends EventController implements EventControlle
 
         this.logger.log({
           local: `${origin}`,
-          message: `Aguardando ${nextDelay.toFixed(1)} segundos antes da próxima tentativa`,
+          message: `Waiting ${nextDelay.toFixed(1)} seconds before next attempt`,
           url: baseURL,
         });
 
@@ -284,11 +420,92 @@ export class WebhookController extends EventController implements EventControlle
     }
   }
 
+  private recordHistory(payload: {
+    instanceName: string;
+    event: string;
+    scope: 'instance' | 'global';
+    url: string;
+    status: WebhookHistoryStatus;
+    httpStatus?: number;
+    attempts: number;
+    startedAt: number;
+    finishedAt: number;
+    errorMessage?: string;
+    errorCode?: string;
+    requestHeaders?: Record<string, string>;
+    requestBody?: unknown;
+    responseBody?: unknown;
+  }): void {
+    if (!webhookHistoryService.enabled) return;
+    try {
+      const entry: Omit<WebhookHistoryEntry, 'id'> = {
+        instanceName: payload.instanceName,
+        scope: payload.scope,
+        event: payload.event,
+        url: payload.url,
+        method: 'POST',
+        status: payload.status,
+        httpStatus: payload.httpStatus,
+        attempts: payload.attempts,
+        latencyMs: Math.max(0, payload.finishedAt - payload.startedAt),
+        errorMessage: payload.errorMessage,
+        errorCode: payload.errorCode,
+        requestHeaders: this.scrubHeaders(payload.requestHeaders),
+        requestBody: payload.requestBody,
+        responseBody: payload.responseBody as string | undefined,
+        startedAt: payload.startedAt,
+        finishedAt: payload.finishedAt,
+      };
+      webhookHistoryService.record(entry);
+    } catch (err) {
+      this.logger.error({
+        local: 'WebhookController.recordHistory',
+        message: `Failed to record webhook history: ${err?.message}`,
+      });
+    }
+  }
+
+  private scrubHeaders(headers?: Record<string, string>): Record<string, string> | undefined {
+    if (!headers) return undefined;
+    const scrubbed: Record<string, string> = {};
+    for (const [k, v] of Object.entries(headers)) {
+      const lower = k.toLowerCase();
+      if (lower === 'authorization' || lower === 'cookie' || lower === 'set-cookie' || lower === 'x-api-key') {
+        scrubbed[k] = '***';
+      } else {
+        scrubbed[k] = v;
+      }
+    }
+    return scrubbed;
+  }
+
+  private applySignatureHeaders(headers: Record<string, string>, payload: unknown, webhookConfig: Webhook): void {
+    const signing = webhookConfig.SIGNING;
+    const secret = signing?.SECRET?.trim();
+    if (!secret) return;
+
+    const timestampSeconds = Math.floor(Date.now() / 1000).toString();
+    const bodyString = JSON.stringify(payload ?? {});
+    const signingPayload = signing?.INCLUDE_TIMESTAMP === false ? bodyString : `${timestampSeconds}.${bodyString}`;
+    const digest = createHmac('sha256', secret).update(signingPayload).digest('hex');
+    const signatureHeader = signing?.HEADER || 'X-Evolution-Signature';
+
+    if (signing?.INCLUDE_TIMESTAMP === false) {
+      headers[signatureHeader] = `v1=${digest}`;
+    } else {
+      headers[signatureHeader] = `t=${timestampSeconds},v1=${digest}`;
+      const timestampHeader = signing?.TIMESTAMP_HEADER || 'X-Evolution-Timestamp';
+      headers[timestampHeader] = timestampSeconds;
+    }
+  }
+
   private generateJwtToken(authToken: string): string {
     try {
+      const expiresIn = configService.get<Webhook>('WEBHOOK').BEARER_JWT?.EXPIRES_SECONDS ?? 600;
+      const now = Math.floor(Date.now() / 1000);
       const payload = {
-        iat: Math.floor(Date.now() / 1000),
-        exp: Math.floor(Date.now() / 1000) + 600, // 10 min expiration
+        iat: now,
+        exp: now + Math.max(expiresIn, 60),
         app: 'evolution',
         action: 'webhook',
       };

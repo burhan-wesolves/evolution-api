@@ -126,7 +126,9 @@ export class SqsController extends EventController implements EventControllerInt
             ? 'singlequeue'
             : `${event.replace('.', '_').toLowerCase()}`;
         const queueName = `${prefixName}_${eventFormatted}.fifo`;
-        const sqsUrl = `https://sqs.${sqsConfig.REGION}.amazonaws.com/${sqsConfig.ACCOUNT_ID}/${queueName}`;
+        const rawBaseUrl = sqsConfig.BASE_URL || `https://sqs.${sqsConfig.REGION}.amazonaws.com`;
+        const baseUrl = rawBaseUrl.replace(/\/+$/, '');
+        const sqsUrl = `${baseUrl}/${sqsConfig.ACCOUNT_ID}/${queueName}`;
 
         const message = {
           ...(extra ?? {}),
@@ -215,7 +217,7 @@ export class SqsController extends EventController implements EventControllerInt
         const normalizedEvent =
           sqsConfig.GLOBAL_ENABLED && sqsConfig.GLOBAL_FORCE_SINGLE_QUEUE ? 'singlequeue' : event.toLowerCase();
         if (eventsFinded.includes(normalizedEvent)) {
-          this.logger.info(`A queue para o evento "${normalizedEvent}" já existe. Ignorando criação.`);
+          this.logger.info(`Queue for event "${normalizedEvent}" already exists. Skipping creation.`);
           continue;
         }
 
@@ -231,9 +233,9 @@ export class SqsController extends EventController implements EventControllerInt
           });
 
           const data = await this.sqs.send(createCommand);
-          this.logger.info(`Queue ${queueName} criada: ${data.QueueUrl}`);
+          this.logger.info(`Queue ${queueName} created: ${data.QueueUrl}`);
         } catch (err: any) {
-          this.logger.error(`Erro ao criar queue ${queueName}: ${err.message}`);
+          this.logger.error(`Error creating queue ${queueName}: ${err.message}`);
         }
 
         if (sqsConfig.GLOBAL_ENABLED && sqsConfig.GLOBAL_FORCE_SINGLE_QUEUE) {
@@ -260,7 +262,7 @@ export class SqsController extends EventController implements EventControllerInt
         });
       }
     } catch (error: any) {
-      this.logger.error(`Erro ao listar filas para ${prefixName}: ${error.message}`);
+      this.logger.error(`Error listing queues for ${prefixName}: ${error.message}`);
       return;
     }
 

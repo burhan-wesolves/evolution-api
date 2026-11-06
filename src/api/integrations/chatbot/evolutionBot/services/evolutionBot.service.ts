@@ -4,7 +4,6 @@ import { WAMonitoringService } from '@api/services/monitor.service';
 import { Integration } from '@api/types/wa.types';
 import { ConfigService, HttpServer } from '@config/env.config';
 import { EvolutionBot, EvolutionBotSetting, IntegrationSession } from '@prisma/client';
-import { sendTelemetry } from '@utils/sendTelemetry';
 import axios from 'axios';
 import { isURL } from 'class-validator';
 
@@ -153,9 +152,6 @@ export class EvolutionBotService extends BaseChatbotService<EvolutionBot, Evolut
       } else {
         this.logger.warn(`[EvolutionBot] No message content received from bot response`);
       }
-
-      // Send telemetry
-      sendTelemetry('/message/sendText');
     } catch (error) {
       this.logger.error(`Error in sendMessageToBot: ${error.message || JSON.stringify(error)}`);
       return;

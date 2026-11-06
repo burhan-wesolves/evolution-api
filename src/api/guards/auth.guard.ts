@@ -7,6 +7,13 @@ import { NextFunction, Request, Response } from 'express';
 
 const logger = new Logger('GUARD');
 
+// Manager UI paramless routes that identify the instance via per-instance
+// token in the apikey header. authGuard resolves the instance and writes
+// req.params.instanceName so downstream handlers behave like the regular
+// path-param routes.
+const PARAMLESS_INSTANCE_ROUTES = ['/instance/reconnect', '/instance/logout', '/instance/qr', '/instance/all'];
+const isParamlessAlias = (url: string) => PARAMLESS_INSTANCE_ROUTES.includes(url.split('?')[0]);
+
 async function apikey(req: Request, _: Response, next: NextFunction) {
   const env = configService.get<Auth>('AUTHENTICATION').API_KEY;
   const key = req.get('apikey');
@@ -17,6 +24,18 @@ async function apikey(req: Request, _: Response, next: NextFunction) {
   }
 
   if (env.KEY === key) {
+    // Global key on a paramless alias: resolve via ?instanceName= (the UI
+    // sends the per-instance token, so this branch only fires for clients
+    // using the global key explicitly). Without an identifier we cannot
+    // disambiguate, so reject with a clear 400 rather than silently 404ing.
+    if (isParamlessAlias(req.originalUrl)) {
+      const qName = (req.query?.instanceName as string) || (req.query?.instance as string);
+      if (qName) {
+        (req.params as any).instanceName = qName;
+        return next();
+      }
+      // Fall through — let the existing routes match if any; otherwise 404.
+    }
     return next();
   }
 
@@ -34,11 +53,20 @@ async function apikey(req: Request, _: Response, next: NextFunction) {
         return next();
       }
     } else {
-      if (req.originalUrl.includes('/instance/fetchInstances') && db.SAVE_DATA.INSTANCE) {
+      // No :instanceName in path. Look up by token and (for paramless aliases)
+      // write the resolved name back into req.params so the route handler can
+      // pick it up via dataValidate().
+      if (
+        (req.originalUrl.includes('/instance/fetchInstances') || isParamlessAlias(req.originalUrl)) &&
+        db.SAVE_DATA.INSTANCE
+      ) {
         const instanceByKey = await prismaRepository.instance.findFirst({
           where: { token: key },
         });
         if (instanceByKey) {
+          if (isParamlessAlias(req.originalUrl)) {
+            (req.params as any).instanceName = instanceByKey.name;
+          }
           return next();
         }
       }

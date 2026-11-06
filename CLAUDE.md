@@ -219,5 +219,3 @@ Currently, the project has minimal formal testing infrastructure:
 - Docker support with `Dockerfile` and `docker-compose.yaml`
 - Graceful shutdown handling for connections
 - Health check endpoints for monitoring
-- Sentry integration for error tracking
-- Telemetry for usage analytics (non-sensitive data only)

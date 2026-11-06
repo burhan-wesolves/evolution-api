@@ -1,9 +1,13 @@
 import {
   ArchiveChatDto,
   BlockUserDto,
+  ClearChatForMeDto,
+  DecryptPollVoteDto,
   DeleteMessage,
+  DeleteMessageForMeDto,
   getBase64FromMediaMessageDto,
   MarkChatUnreadDto,
+  MarkMessageAsPlayedDto,
   NumberDto,
   PrivacySettingDto,
   ProfileNameDto,
@@ -30,6 +34,10 @@ export class ChatController {
     return await this.waMonitor.waInstances[instanceName].markMessageAsRead(data);
   }
 
+  public async markMessageAsPlayed({ instanceName }: InstanceDto, data: MarkMessageAsPlayedDto) {
+    return await this.waMonitor.waInstances[instanceName].markMessageAsPlayed(data);
+  }
+
   public async archiveChat({ instanceName }: InstanceDto, data: ArchiveChatDto) {
     return await this.waMonitor.waInstances[instanceName].archiveChat(data);
   }
@@ -42,12 +50,24 @@ export class ChatController {
     return await this.waMonitor.waInstances[instanceName].deleteMessage(data);
   }
 
+  public async deleteMessageForMe({ instanceName }: InstanceDto, data: DeleteMessageForMeDto) {
+    return await this.waMonitor.waInstances[instanceName].deleteMessageForMe(data);
+  }
+
+  public async clearChatForMe({ instanceName }: InstanceDto, data: ClearChatForMeDto) {
+    return await this.waMonitor.waInstances[instanceName].clearChatForMe(data);
+  }
+
   public async fetchProfilePicture({ instanceName }: InstanceDto, data: NumberDto) {
     return await this.waMonitor.waInstances[instanceName].profilePicture(data.number);
   }
 
   public async fetchProfile({ instanceName }: InstanceDto, data: NumberDto) {
     return await this.waMonitor.waInstances[instanceName].fetchProfile(instanceName, data.number);
+  }
+
+  public async fetchLid({ instanceName }: InstanceDto, data: NumberDto) {
+    return await this.waMonitor.waInstances[instanceName].getLid(data.number);
   }
 
   public async fetchContacts({ instanceName }: InstanceDto, query: Query<Contact>) {
@@ -112,5 +132,17 @@ export class ChatController {
 
   public async blockUser({ instanceName }: InstanceDto, data: BlockUserDto) {
     return await this.waMonitor.waInstances[instanceName].blockUser(data);
+  }
+
+  public async decryptPollVote({ instanceName }: InstanceDto, data: DecryptPollVoteDto) {
+    const pollCreationMessageKey = {
+      id: data.message.key.id,
+      remoteJid: data.remoteJid,
+    };
+    return await this.waMonitor.waInstances[instanceName].baileysDecryptPollVote(pollCreationMessageKey);
+  }
+
+  public async fetchChannels({ instanceName }: InstanceDto, query: Query<Contact>) {
+    return await this.waMonitor.waInstances[instanceName].fetchChannels(query);
   }
 }
