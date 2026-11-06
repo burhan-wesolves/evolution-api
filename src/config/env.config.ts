@@ -91,7 +91,6 @@ export type EventsRabbitmq = {
   CALL: boolean;
   TYPEBOT_START: boolean;
   TYPEBOT_CHANGE_STATUS: boolean;
-  MESSAGING_HISTORY_SET: boolean;
 };
 
 export type Rabbitmq = {
@@ -122,7 +121,6 @@ export type Sqs = {
   SECRET_ACCESS_KEY: string;
   ACCOUNT_ID: string;
   REGION: string;
-  BASE_URL: string;
   MAX_PAYLOAD_SIZE: number;
   EVENTS: {
     APPLICATION_STARTUP: boolean;
@@ -152,7 +150,6 @@ export type Sqs = {
     SEND_MESSAGE: boolean;
     TYPEBOT_CHANGE_STATUS: boolean;
     TYPEBOT_START: boolean;
-    MESSAGING_HISTORY_SET: boolean;
   };
 };
 
@@ -226,7 +223,6 @@ export type EventsWebhook = {
   CALL: boolean;
   TYPEBOT_START: boolean;
   TYPEBOT_CHANGE_STATUS: boolean;
-  MESSAGING_HISTORY_SET: boolean;
   ERRORS: boolean;
   ERRORS_WEBHOOK: string;
 };
@@ -260,7 +256,6 @@ export type EventsPusher = {
   CALL: boolean;
   TYPEBOT_START: boolean;
   TYPEBOT_CHANGE_STATUS: boolean;
-  MESSAGING_HISTORY_SET: boolean;
 };
 
 export type ApiKey = { KEY: string };
@@ -315,62 +310,9 @@ export type Webhook = {
     JITTER_FACTOR?: number;
     NON_RETRYABLE_STATUS_CODES?: number[];
   };
-  HISTORY?: {
-    ENABLED?: boolean;
-    MAX_ENTRIES_PER_INSTANCE?: number;
-    CAPTURE_RESPONSE_BODY?: boolean;
-    RESPONSE_BODY_MAX_BYTES?: number;
-  };
-  SIGNING?: {
-    SECRET?: string;
-    HEADER?: string;
-    TIMESTAMP_HEADER?: string;
-    INCLUDE_TIMESTAMP?: boolean;
-  };
-  BEARER_JWT?: {
-    KEY?: string;
-    EXPIRES_SECONDS?: number;
-  };
 };
 export type Pusher = { ENABLED: boolean; GLOBAL?: GlobalPusher; EVENTS: EventsPusher };
-export type WatchmanSmtp = {
-  HOST: string;
-  PORT: number;
-  SECURE: boolean;
-  USER: string;
-  PASS: string;
-  FROM: string;
-};
-export type Watchman = {
-  ENABLED: boolean;
-  // Instance names to watch. Empty => watch none, so enabling the feature alone
-  // cannot start tracking every tenant's messages by accident.
-  INSTANCES: string[];
-  // A dropped connection reconnects in seconds; only alert if it is still down
-  // after this, so a blip does not page anyone. A logout alerts immediately.
-  ALERT_DELAY_SECONDS: number;
-  // How often to retry messages our webhook never accepted.
-  REDELIVERY_INTERVAL_SECONDS: number;
-  // Leave the live webhook (which has its own retries) time to succeed before
-  // a sweep re-sends the same message.
-  REDELIVERY_MIN_AGE_SECONDS: number;
-  // Messages re-sent per sweep, per instance.
-  REDELIVERY_BATCH: number;
-  // After this many failed attempts a message is parked as `failed`.
-  MAX_ATTEMPTS: number;
-  // Where a watched instance's messages must be delivered. Set this and the
-  // watchman re-creates the instance's webhook configuration whenever it is
-  // missing -- which is every time an instance is deleted and recreated, the
-  // normal way to re-pair after a logout. The Webhook row cascades away with
-  // the instance, so without this the integration goes silently dead: nothing
-  // is delivered, nothing is replayed, and nothing errors, because there is no
-  // endpoint left to fail against. Empty disables the repair.
-  WEBHOOK_URL: string;
-  ALERT_TO: string[];
-  SMTP: WatchmanSmtp;
-};
 export type ConfigSessionPhone = { CLIENT: string; NAME: string };
-export type Baileys = { VERSION?: string };
 export type QrCode = { LIMIT: number; COLOR: string };
 export type Typebot = { ENABLED: boolean; API_VERSION: string; SEND_MEDIA_BASE64: boolean };
 export type Chatwoot = {
@@ -415,6 +357,11 @@ export type Metrics = {
   ALLOWED_IPS?: string;
 };
 
+export type Telemetry = {
+  ENABLED: boolean;
+  URL?: string;
+};
+
 export type Proxy = {
   HOST?: string;
   PORT?: string;
@@ -434,19 +381,15 @@ export type Facebook = {
   USER_TOKEN?: string;
 };
 
+export type Sentry = {
+  DSN?: string;
+};
+
 export type EventEmitter = {
   MAX_LISTENERS: number;
 };
 
 export type Production = boolean;
-
-export type Integrations = {
-  ENABLED: boolean;
-};
-
-export type ChatUi = {
-  ENABLED: boolean;
-};
 
 export interface Env {
   SERVER: HttpServer;
@@ -466,9 +409,7 @@ export interface Env {
   LANGUAGE: Language;
   WEBHOOK: Webhook;
   PUSHER: Pusher;
-  WATCHMAN: Watchman;
   CONFIG_SESSION_PHONE: ConfigSessionPhone;
-  BAILEYS: Baileys;
   QRCODE: QrCode;
   TYPEBOT: Typebot;
   CHATWOOT: Chatwoot;
@@ -481,12 +422,12 @@ export interface Env {
   S3?: S3;
   AUTHENTICATION: Auth;
   METRICS: Metrics;
+  TELEMETRY: Telemetry;
   PROXY: Proxy;
   AUDIO_CONVERTER: AudioConverter;
   FACEBOOK: Facebook;
+  SENTRY: Sentry;
   EVENT_EMITTER: EventEmitter;
-  INTEGRATIONS: Integrations;
-  CHAT_UI: ChatUi;
   PRODUCTION?: Production;
 }
 
@@ -596,7 +537,6 @@ export class ConfigService {
           CALL: process.env?.RABBITMQ_EVENTS_CALL === 'true',
           TYPEBOT_START: process.env?.RABBITMQ_EVENTS_TYPEBOT_START === 'true',
           TYPEBOT_CHANGE_STATUS: process.env?.RABBITMQ_EVENTS_TYPEBOT_CHANGE_STATUS === 'true',
-          MESSAGING_HISTORY_SET: process.env?.RABBITMQ_EVENTS_MESSAGING_HISTORY_SET === 'true',
         },
       },
       NATS: {
@@ -634,7 +574,6 @@ export class ConfigService {
           CALL: process.env?.NATS_EVENTS_CALL === 'true',
           TYPEBOT_START: process.env?.NATS_EVENTS_TYPEBOT_START === 'true',
           TYPEBOT_CHANGE_STATUS: process.env?.NATS_EVENTS_TYPEBOT_CHANGE_STATUS === 'true',
-          MESSAGING_HISTORY_SET: process.env?.NATS_EVENTS_MESSAGING_HISTORY_SET === 'true',
         },
       },
       SQS: {
@@ -646,7 +585,6 @@ export class ConfigService {
         SECRET_ACCESS_KEY: process.env.SQS_SECRET_ACCESS_KEY || '',
         ACCOUNT_ID: process.env.SQS_ACCOUNT_ID || '',
         REGION: process.env.SQS_REGION || '',
-        BASE_URL: process.env.SQS_BASE_URL || '',
         MAX_PAYLOAD_SIZE: Number.parseInt(process.env.SQS_MAX_PAYLOAD_SIZE ?? '1048576'),
         EVENTS: {
           APPLICATION_STARTUP: process.env?.SQS_GLOBAL_APPLICATION_STARTUP === 'true',
@@ -676,7 +614,6 @@ export class ConfigService {
           SEND_MESSAGE: process.env?.SQS_GLOBAL_SEND_MESSAGE === 'true',
           TYPEBOT_CHANGE_STATUS: process.env?.SQS_GLOBAL_TYPEBOT_CHANGE_STATUS === 'true',
           TYPEBOT_START: process.env?.SQS_GLOBAL_TYPEBOT_START === 'true',
-          MESSAGING_HISTORY_SET: process.env?.SQS_GLOBAL_MESSAGING_HISTORY_SET === 'true',
         },
       },
       KAFKA: {
@@ -720,7 +657,6 @@ export class ConfigService {
           CALL: process.env?.KAFKA_EVENTS_CALL === 'true',
           TYPEBOT_START: process.env?.KAFKA_EVENTS_TYPEBOT_START === 'true',
           TYPEBOT_CHANGE_STATUS: process.env?.KAFKA_EVENTS_TYPEBOT_CHANGE_STATUS === 'true',
-          MESSAGING_HISTORY_SET: process.env?.KAFKA_EVENTS_MESSAGING_HISTORY_SET === 'true',
         },
         SASL:
           process.env?.KAFKA_SASL_ENABLED === 'true'
@@ -746,31 +682,6 @@ export class ConfigService {
         ENABLED: process.env?.WEBSOCKET_ENABLED === 'true',
         GLOBAL_EVENTS: process.env?.WEBSOCKET_GLOBAL_EVENTS === 'true',
         ALLOWED_HOSTS: process.env?.WEBSOCKET_ALLOWED_HOSTS,
-      },
-      WATCHMAN: {
-        ENABLED: process.env?.WATCHMAN_ENABLED === 'true',
-        INSTANCES: (process.env?.WATCHMAN_INSTANCES || '')
-          .split(',')
-          .map((name) => name.trim())
-          .filter((name) => name.length > 0),
-        ALERT_DELAY_SECONDS: Number.parseInt(process.env?.WATCHMAN_ALERT_DELAY_SECONDS) || 60,
-        REDELIVERY_INTERVAL_SECONDS: Number.parseInt(process.env?.WATCHMAN_REDELIVERY_INTERVAL_SECONDS) || 300,
-        REDELIVERY_MIN_AGE_SECONDS: Number.parseInt(process.env?.WATCHMAN_REDELIVERY_MIN_AGE_SECONDS) || 120,
-        REDELIVERY_BATCH: Number.parseInt(process.env?.WATCHMAN_REDELIVERY_BATCH) || 100,
-        MAX_ATTEMPTS: Number.parseInt(process.env?.WATCHMAN_MAX_ATTEMPTS) || 10,
-        WEBHOOK_URL: (process.env?.WATCHMAN_WEBHOOK_URL || '').trim(),
-        ALERT_TO: (process.env?.WATCHMAN_ALERT_TO || '')
-          .split(',')
-          .map((address) => address.trim())
-          .filter((address) => address.length > 0),
-        SMTP: {
-          HOST: process.env?.WATCHMAN_SMTP_HOST || '',
-          PORT: Number.parseInt(process.env?.WATCHMAN_SMTP_PORT) || 587,
-          SECURE: process.env?.WATCHMAN_SMTP_SECURE === 'true',
-          USER: process.env?.WATCHMAN_SMTP_USER || '',
-          PASS: process.env?.WATCHMAN_SMTP_PASS || '',
-          FROM: process.env?.WATCHMAN_SMTP_FROM || '',
-        },
       },
       PUSHER: {
         ENABLED: process.env?.PUSHER_ENABLED === 'true',
@@ -811,7 +722,6 @@ export class ConfigService {
           CALL: process.env?.PUSHER_EVENTS_CALL === 'true',
           TYPEBOT_START: process.env?.PUSHER_EVENTS_TYPEBOT_START === 'true',
           TYPEBOT_CHANGE_STATUS: process.env?.PUSHER_EVENTS_TYPEBOT_CHANGE_STATUS === 'true',
-          MESSAGING_HISTORY_SET: process.env?.PUSHER_EVENTS_MESSAGING_HISTORY_SET === 'true',
         },
       },
       WA_BUSINESS: {
@@ -869,7 +779,6 @@ export class ConfigService {
           CALL: process.env?.WEBHOOK_EVENTS_CALL === 'true',
           TYPEBOT_START: process.env?.WEBHOOK_EVENTS_TYPEBOT_START === 'true',
           TYPEBOT_CHANGE_STATUS: process.env?.WEBHOOK_EVENTS_TYPEBOT_CHANGE_STATUS === 'true',
-          MESSAGING_HISTORY_SET: process.env?.WEBHOOK_EVENTS_MESSAGING_HISTORY_SET === 'true',
           ERRORS: process.env?.WEBHOOK_EVENTS_ERRORS === 'true',
           ERRORS_WEBHOOK: process.env?.WEBHOOK_EVENTS_ERRORS_WEBHOOK || '',
         },
@@ -886,29 +795,10 @@ export class ConfigService {
             400, 401, 403, 404, 422,
           ],
         },
-        HISTORY: {
-          ENABLED: process.env?.WEBHOOK_HISTORY_ENABLED !== 'false',
-          MAX_ENTRIES_PER_INSTANCE: Number.parseInt(process.env?.WEBHOOK_HISTORY_MAX_ENTRIES_PER_INSTANCE) || 500,
-          CAPTURE_RESPONSE_BODY: process.env?.WEBHOOK_HISTORY_CAPTURE_RESPONSE_BODY !== 'false',
-          RESPONSE_BODY_MAX_BYTES: Number.parseInt(process.env?.WEBHOOK_HISTORY_RESPONSE_BODY_MAX_BYTES) || 4096,
-        },
-        SIGNING: {
-          SECRET: process.env?.WEBHOOK_SIGNING_SECRET || '',
-          HEADER: process.env?.WEBHOOK_SIGNING_HEADER || 'X-Evolution-Signature',
-          TIMESTAMP_HEADER: process.env?.WEBHOOK_SIGNING_TIMESTAMP_HEADER || 'X-Evolution-Timestamp',
-          INCLUDE_TIMESTAMP: process.env?.WEBHOOK_SIGNING_INCLUDE_TIMESTAMP !== 'false',
-        },
-        BEARER_JWT: {
-          KEY: process.env?.WEBHOOK_BEARER_JWT_KEY || '',
-          EXPIRES_SECONDS: Number.parseInt(process.env?.WEBHOOK_BEARER_JWT_EXPIRES_SECONDS) || 600,
-        },
       },
       CONFIG_SESSION_PHONE: {
         CLIENT: process.env?.CONFIG_SESSION_PHONE_CLIENT || 'Evolution API',
         NAME: process.env?.CONFIG_SESSION_PHONE_NAME || 'Chrome',
-      },
-      BAILEYS: {
-        VERSION: process.env?.CONFIG_BAILEYS_VERSION,
       },
       QRCODE: {
         LIMIT: Number.parseInt(process.env.QRCODE_LIMIT) || 30,
@@ -987,6 +877,10 @@ export class ConfigService {
         PASSWORD: process.env?.METRICS_PASSWORD,
         ALLOWED_IPS: process.env?.METRICS_ALLOWED_IPS,
       },
+      TELEMETRY: {
+        ENABLED: process.env?.TELEMETRY_ENABLED === undefined || process.env?.TELEMETRY_ENABLED === 'true',
+        URL: process.env?.TELEMETRY_URL,
+      },
       PROXY: {
         HOST: process.env?.PROXY_HOST,
         PORT: process.env?.PROXY_PORT,
@@ -1003,14 +897,11 @@ export class ConfigService {
         CONFIG_ID: process.env?.FACEBOOK_CONFIG_ID,
         USER_TOKEN: process.env?.FACEBOOK_USER_TOKEN,
       },
+      SENTRY: {
+        DSN: process.env?.SENTRY_DSN,
+      },
       EVENT_EMITTER: {
         MAX_LISTENERS: Number.parseInt(process.env?.EVENT_EMITTER_MAX_LISTENERS) || 50,
-      },
-      INTEGRATIONS: {
-        ENABLED: process.env?.INTEGRATIONS !== 'false',
-      },
-      CHAT_UI: {
-        ENABLED: process.env?.CHAT_UI !== 'false',
       },
     };
   }

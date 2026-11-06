@@ -34,13 +34,7 @@ lerna-debug.log*
 # Project related
 /instances/*
 !/instances/.gitkeep
-# Upstream ignores all of /test/, which it uses as a scratch directory. Keep
-# that, but track real suites: an ignored test is not a test -- nobody else
-# gets it on clone and no CI can run it. Written as /test/* rather than
-# /test/ so the negation takes effect (git does not descend into an excluded
-# directory, so un-ignoring a file inside one does nothing).
-/test/*
-!/test/*.test.ts
+/test/
 /src/env.yml
 /store
 *.env
@@ -52,7 +46,3 @@ lerna-debug.log*
 .tool-versions
 
 /prisma/migrations/*
-
-# Local test artifacts: a pairing QR is effectively a session credential.
-*-qr.png
-.playwright-mcp/

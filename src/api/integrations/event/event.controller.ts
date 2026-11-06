@@ -162,7 +162,6 @@ export class EventController {
     'CALL',
     'TYPEBOT_START',
     'TYPEBOT_CHANGE_STATUS',
-    'MESSAGING_HISTORY_SET',
     'REMOVE_INSTANCE',
     'LOGOUT_INSTANCE',
     'INSTANCE_CREATE',

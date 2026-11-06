@@ -77,7 +77,7 @@ export const textMessageSchema: JSONSchema7 = {
       description: 'Enter a value in milliseconds',
     },
     quoted: { ...quotedOptionsSchema },
-    mentionsEveryOne: { type: 'boolean', enum: [true, false] },
+    everyOne: { type: 'boolean', enum: [true, false] },
     mentioned: {
       type: 'array',
       minItems: 1,
@@ -102,21 +102,12 @@ export const mediaMessageSchema: JSONSchema7 = {
     media: { type: 'string' },
     fileName: { type: 'string' },
     caption: { type: 'string' },
-    gifPlayback: {
-      oneOf: [{ type: 'boolean' }, { type: 'string', enum: ['true', 'false'] }],
-    },
-    gifAttribution: {
-      oneOf: [
-        { type: 'integer', enum: [0, 1, 2] },
-        { type: 'string', enum: ['0', '1', '2'] },
-      ],
-    },
     delay: {
       type: 'integer',
       description: 'Enter a value in milliseconds',
     },
     quoted: { ...quotedOptionsSchema },
-    mentionsEveryOne: { type: 'boolean', enum: [true, false] },
+    everyOne: { type: 'boolean', enum: [true, false] },
     mentioned: {
       type: 'array',
       minItems: 1,
@@ -142,7 +133,7 @@ export const ptvMessageSchema: JSONSchema7 = {
       description: 'Enter a value in milliseconds',
     },
     quoted: { ...quotedOptionsSchema },
-    mentionsEveryOne: { type: 'boolean', enum: [true, false] },
+    everyOne: { type: 'boolean', enum: [true, false] },
     mentioned: {
       type: 'array',
       minItems: 1,
@@ -168,7 +159,7 @@ export const audioMessageSchema: JSONSchema7 = {
       description: 'Enter a value in milliseconds',
     },
     quoted: { ...quotedOptionsSchema },
-    mentionsEveryOne: { type: 'boolean', enum: [true, false] },
+    everyOne: { type: 'boolean', enum: [true, false] },
     mentioned: {
       type: 'array',
       minItems: 1,
@@ -218,7 +209,7 @@ export const stickerMessageSchema: JSONSchema7 = {
       description: 'Enter a value in milliseconds',
     },
     quoted: { ...quotedOptionsSchema },
-    mentionsEveryOne: { type: 'boolean', enum: [true, false] },
+    everyOne: { type: 'boolean', enum: [true, false] },
     mentioned: {
       type: 'array',
       minItems: 1,
@@ -247,7 +238,7 @@ export const locationMessageSchema: JSONSchema7 = {
       description: 'Enter a value in milliseconds',
     },
     quoted: { ...quotedOptionsSchema },
-    mentionsEveryOne: { type: 'boolean', enum: [true, false] },
+    everyOne: { type: 'boolean', enum: [true, false] },
     mentioned: {
       type: 'array',
       minItems: 1,
@@ -334,7 +325,7 @@ export const pollMessageSchema: JSONSchema7 = {
       description: 'Enter a value in milliseconds',
     },
     quoted: { ...quotedOptionsSchema },
-    mentionsEveryOne: { type: 'boolean', enum: [true, false] },
+    everyOne: { type: 'boolean', enum: [true, false] },
     mentioned: {
       type: 'array',
       minItems: 1,
@@ -391,7 +382,7 @@ export const listMessageSchema: JSONSchema7 = {
       description: 'Enter a value in milliseconds',
     },
     quoted: { ...quotedOptionsSchema },
-    mentionsEveryOne: { type: 'boolean', enum: [true, false] },
+    everyOne: { type: 'boolean', enum: [true, false] },
     mentioned: {
       type: 'array',
       minItems: 1,
@@ -422,7 +413,7 @@ export const buttonsMessageSchema: JSONSchema7 = {
         properties: {
           type: {
             type: 'string',
-            enum: ['reply', 'copy', 'url', 'call', 'pix', 'flow'],
+            enum: ['reply', 'copy', 'url', 'call', 'pix'],
           },
           displayText: { type: 'string' },
           id: { type: 'string' },
@@ -432,75 +423,9 @@ export const buttonsMessageSchema: JSONSchema7 = {
           name: { type: 'string' },
           keyType: { type: 'string', enum: ['phone', 'email', 'cpf', 'cnpj', 'random'] },
           key: { type: 'string' },
-          flowId: { type: 'string' },
-          flowToken: { type: 'string' },
-          flowCta: { type: 'string' },
-          flowAction: { type: 'string', enum: ['navigate', 'data_exchange'] },
-          flowActionPayload: { type: 'object' },
-          flowMessageVersion: { type: 'string' },
-          flowMode: { type: 'string', enum: ['published', 'draft'] },
         },
         required: ['type'],
         ...isNotEmpty('id', 'url', 'phoneNumber'),
-      },
-    },
-    delay: {
-      type: 'integer',
-      description: 'Enter a value in milliseconds',
-    },
-    quoted: { ...quotedOptionsSchema },
-    mentionsEveryOne: { type: 'boolean', enum: [true, false] },
-    mentioned: {
-      type: 'array',
-      minItems: 1,
-      uniqueItems: true,
-      items: {
-        type: 'string',
-        pattern: '^\\d+',
-        description: '"mentioned" must be an array of numeric strings',
-      },
-    },
-  },
-  required: ['number'],
-};
-
-export const carouselMessageSchema: JSONSchema7 = {
-  $id: v4(),
-  type: 'object',
-  properties: {
-    number: { ...numberDefinition },
-    body: { type: 'string', minLength: 1 },
-    cards: {
-      type: 'array',
-      minItems: 1,
-      maxItems: 10,
-      items: {
-        type: 'object',
-        properties: {
-          title: { type: 'string' },
-          body: { type: 'string', minLength: 1 },
-          footer: { type: 'string' },
-          imageUrl: { type: 'string' },
-          buttons: {
-            type: 'array',
-            minItems: 1,
-            maxItems: 3,
-            items: {
-              type: 'object',
-              properties: {
-                type: { type: 'string', enum: ['reply', 'copy', 'url', 'call'] },
-                displayText: { type: 'string' },
-                id: { type: 'string' },
-                url: { type: 'string' },
-                copyCode: { type: 'string' },
-                phoneNumber: { type: 'string' },
-              },
-              required: ['type'],
-              ...isNotEmpty('id', 'url', 'phoneNumber'),
-            },
-          },
-        },
-        required: ['body', 'buttons'],
       },
     },
     delay: {
@@ -520,27 +445,5 @@ export const carouselMessageSchema: JSONSchema7 = {
       },
     },
   },
-  required: ['number', 'body', 'cards'],
-};
-
-export const decryptPollVoteSchema: JSONSchema7 = {
-  $id: v4(),
-  type: 'object',
-  properties: {
-    message: {
-      type: 'object',
-      properties: {
-        key: {
-          type: 'object',
-          properties: {
-            id: { type: 'string' },
-          },
-          required: ['id'],
-        },
-      },
-      required: ['key'],
-    },
-    remoteJid: { type: 'string' },
-  },
-  required: ['message', 'remoteJid'],
+  required: ['number'],
 };
