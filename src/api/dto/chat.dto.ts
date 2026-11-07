@@ -105,22 +105,6 @@ export class DeleteMessage {
   remoteJid: string;
   participant?: string;
 }
-/**
- * Removes a message from THIS instance only. The other party keeps their copy: this is the
- * "delete for me" of the WhatsApp app, never the revoke behind deleteMessageForEveryone.
- */
-export class DeleteMessageForMeDto {
-  id: string;
-  remoteJid: string;
-  fromMe?: boolean;
-  participant?: string;
-  messageTimestamp?: number;
-}
-/** Clears a chat from THIS instance, up to `beforeTimestamp` (Unix seconds; now when omitted). */
-export class ClearChatForMeDto {
-  remoteJid: string;
-  beforeTimestamp?: number;
-}
 export class Options {
   delay?: number;
   presence?: WAPresence;

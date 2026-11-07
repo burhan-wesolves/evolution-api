@@ -2,10 +2,8 @@ import { RouterBroker } from '@api/abstract/abstract.router';
 import {
   ArchiveChatDto,
   BlockUserDto,
-  ClearChatForMeDto,
   DecryptPollVoteDto,
   DeleteMessage,
-  DeleteMessageForMeDto,
   getBase64FromMediaMessageDto,
   MarkChatUnreadDto,
   MarkMessageAsPlayedDto,
@@ -26,10 +24,8 @@ import { Contact, Message, MessageUpdate } from '@prisma/client';
 import {
   archiveChatSchema,
   blockUserSchema,
-  clearChatForMeSchema,
   contactValidateSchema,
   decryptPollVoteSchema,
-  deleteMessageForMeSchema,
   deleteMessageSchema,
   fetchLidSchema,
   markChatUnreadSchema,
@@ -115,26 +111,6 @@ export class ChatRouter extends RouterBroker {
           schema: deleteMessageSchema,
           ClassRef: DeleteMessage,
           execute: (instance, data) => chatController.deleteMessage(instance, data),
-        });
-
-        return res.status(HttpStatus.CREATED).json(response);
-      })
-      .post(this.routerPath('deleteMessageForMe'), ...guards, async (req, res) => {
-        const response = await this.dataValidate<DeleteMessageForMeDto>({
-          request: req,
-          schema: deleteMessageForMeSchema,
-          ClassRef: DeleteMessageForMeDto,
-          execute: (instance, data) => chatController.deleteMessageForMe(instance, data),
-        });
-
-        return res.status(HttpStatus.CREATED).json(response);
-      })
-      .post(this.routerPath('clearChatForMe'), ...guards, async (req, res) => {
-        const response = await this.dataValidate<ClearChatForMeDto>({
-          request: req,
-          schema: clearChatForMeSchema,
-          ClassRef: ClearChatForMeDto,
-          execute: (instance, data) => chatController.clearChatForMe(instance, data),
         });
 
         return res.status(HttpStatus.CREATED).json(response);
