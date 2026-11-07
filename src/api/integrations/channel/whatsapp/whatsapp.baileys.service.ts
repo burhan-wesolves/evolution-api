@@ -3,9 +3,7 @@ import { OfferCallDto } from '@api/dto/call.dto';
 import {
   ArchiveChatDto,
   BlockUserDto,
-  ClearChatForMeDto,
   DeleteMessage,
-  DeleteMessageForMeDto,
   getBase64FromMediaMessageDto,
   LastMessage,
   MarkChatUnreadDto,
@@ -169,9 +167,6 @@ export interface ExtendedIMessageKey extends proto.IMessageKey {
   server_id?: string;
   isViewOnce?: boolean;
 }
-
-// Long enough for a recipient's retry receipt to find the message; see deleteMessageForMe.
-const STORED_MESSAGE_PURGE_DELAY_MS = 5 * 60 * 1000;
 
 const groupMetadataCache = new CacheService(new CacheEngine(configService, 'groups').getEngine());
 
@@ -903,12 +898,7 @@ export class BaileysStartupService extends ChannelStartupService {
       },
       msgRetryCounterCache: this.msgRetryCounterCache,
       generateHighQualityLinkPreview: true,
-      // A message whose stored row is gone must read as "no message": getMessage's fallback is an
-      // empty conversation, and a retry receipt would relay that blank to the recipient.
-      getMessage: async (key) => {
-        const stored = (await this.getMessage(key)) as proto.IMessage;
-        return stored?.conversation === '' ? undefined : stored;
-      },
+      getMessage: async (key) => (await this.getMessage(key)) as Promise<proto.IMessage>,
       // Removido browserOptions para usar Multi-Device nativo (não WebClient)
       markOnlineOnConnect: this.localSettings.alwaysOnline,
       retryRequestDelayMs: 350,
@@ -4524,87 +4514,6 @@ export class BaileysStartupService extends ChannelStartupService {
         message: ['An error occurred while marked unread the chat. Open a calling.', error.toString()],
       });
     }
-  }
-
-  /**
-   * Delete for me: an app-state change on this account only. The recipient's copy is untouched,
-   * which is what separates this from deleteMessage below, a revoke that reaches their phone.
-   *
-   * The stored row outlives the call by STORED_MESSAGE_PURGE_DELAY_MS on purpose. A recipient device
-   * that failed to decrypt asks us to resend, and Baileys answers that retry from this row, so
-   * dropping it at send time would turn a slow device into a "waiting for this message" bubble. A
-   * restart loses the timer; clearChatForMe removes whatever is left.
-   */
-  public async deleteMessageForMe(data: DeleteMessageForMeDto) {
-    const stored = (await this.getMessage({ id: data.id }, true)) as proto.IWebMessageInfo & {
-      messageTimestamp?: number;
-    };
-    const key: proto.IMessageKey = stored?.key ?? {
-      id: data.id,
-      remoteJid: data.remoteJid,
-      fromMe: data.fromMe ?? true,
-      ...(data.participant ? { participant: data.participant } : {}),
-    };
-    const timestamp = Number(data.messageTimestamp ?? stored?.messageTimestamp ?? Math.floor(Date.now() / 1000));
-    try {
-      await this.client.chatModify(
-        { deleteForMe: { deleteMedia: true, key, timestamp } },
-        key.remoteJid ?? data.remoteJid,
-      );
-    } catch (error) {
-      throw new InternalServerErrorException('Error while deleting message for me', error?.toString());
-    }
-    setTimeout(() => {
-      this.prismaRepository.message
-        .deleteMany({ where: { instanceId: this.instanceId, key: { path: ['id'], equals: data.id } } })
-        .catch((error) => this.logger.warn(`Could not purge a stored message: ${error?.toString()}`));
-    }, STORED_MESSAGE_PURGE_DELAY_MS).unref();
-    return { deleted: true };
-  }
-
-  /**
-   * Clear one chat from this account up to `beforeTimestamp`, then drop the stored rows up to the
-   * same instant. Newer messages stay: they may still be in flight to the webhook. Clearing on
-   * WhatsApp can fail (no app-state key yet, socket down) and the rows still go, so the report says
-   * which half happened. Repeat calls find nothing left and answer `deleted: 0`.
-   */
-  public async clearChatForMe(data: ClearChatForMeDto) {
-    const remoteJid = createJid(data.remoteJid);
-    const before = data.beforeTimestamp ?? Math.floor(Date.now() / 1000);
-    const where = {
-      instanceId: this.instanceId,
-      messageTimestamp: { lte: before },
-      key: { path: ['remoteJid'], equals: remoteJid },
-    };
-    // Watchman rows parked as `failed` keep their payload so an endpoint repair can revive them
-    // (that is why failure itself must not null it). A cleared chat is being forgotten, so drop the
-    // message bodies here. Pending rows are left alone: they are still owed a delivery.
-    try {
-      await this.prismaRepository.messageDelivery.updateMany({
-        where: {
-          instanceName: this.instance.name,
-          remoteJid,
-          messageTimestamp: { lte: before },
-          status: 'failed',
-        },
-        data: { payload: null },
-      });
-    } catch (error) {
-      this.logger.warn(`Could not prune parked watchman payloads: ${error?.toString()}`);
-    }
-    const last = await this.prismaRepository.message.findFirst({ where, orderBy: { messageTimestamp: 'desc' } });
-    if (!last) return { cleared: false, deleted: 0 };
-
-    let cleared = true;
-    try {
-      const lastMessage = { key: last.key as proto.IMessageKey, messageTimestamp: last.messageTimestamp };
-      await this.client.chatModify({ clear: true, lastMessages: [lastMessage] }, remoteJid);
-    } catch (error) {
-      cleared = false;
-      this.logger.warn(`Could not clear a chat on WhatsApp: ${error?.toString()}`);
-    }
-    const { count } = await this.prismaRepository.message.deleteMany({ where });
-    return { cleared, deleted: count };
   }
 
   public async deleteMessage(del: DeleteMessage) {
